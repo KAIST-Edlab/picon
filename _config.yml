@@ -1,7 +1,7 @@
 title: "PICon"
 description: "A Multi-Turn Interrogation Framework for Evaluating Persona Agent Consistency"
 url: "https://kaist-edlab.github.io"
-baseurl: "/picon.github.io"
+baseurl: "/picon"
 
 # Build
 markdown: kramdown
