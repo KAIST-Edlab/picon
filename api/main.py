@@ -221,7 +221,13 @@ async def experience_start(req: ExperienceStartRequest):
             session["question_queue"].get, timeout=60
         )
     except queue.Empty:
-        raise HTTPException(status_code=500, detail="Timeout waiting for first question")
+        error = session.get("error") or "Timeout waiting for first question"
+        raise HTTPException(status_code=500, detail=error)
+
+    # If picon failed immediately, __COMPLETE__ is the first message
+    if first_q.get("question") == "__COMPLETE__":
+        error = session.get("error") or "Interview failed to start"
+        raise HTTPException(status_code=500, detail=error)
 
     return {
         "session_id": session_id,
@@ -574,4 +580,26 @@ async def health():
         redis_ok = True
     except Exception:
         pass
-    return {"status": "ok", "redis": redis_ok}
+
+    picon_ok = False
+    picon_err = None
+    try:
+        import picon
+        picon_ok = True
+    except Exception as e:
+        picon_err = str(e)
+
+    env_keys = {
+        "GEMINI_API_KEY": bool(os.getenv("GEMINI_API_KEY")),
+        "OPENAI_API_KEY": bool(os.getenv("OPENAI_API_KEY")),
+        "SERPER_API_KEY": bool(os.getenv("SERPER_API_KEY")),
+        "BRIDGE_BASE_URL": os.getenv("BRIDGE_BASE_URL", "(not set)"),
+    }
+
+    return {
+        "status": "ok",
+        "redis": redis_ok,
+        "picon": picon_ok,
+        "picon_error": picon_err,
+        "env_keys": env_keys,
+    }
