@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \":*)",
+      "Bash(ls /home/edlab/mskim/interrogation_eval/fig_main*.pdf /home/edlab/mskim/interrogation_eval/fig_inter*.pdf)",
+      "Bash(ruby --version)",
+      "Bash(bundle --version)",
+      "Bash(jekyll --version)",
+      "Bash(docker --version)",
+      "Bash(conda list:*)",
+      "Bash(docker run:*)",
+      "Bash(chmod 666 /home/edlab/mskim/picon_web/Gemfile.lock)",
+      "Bash(docker ps:*)",
+      "Bash(docker stop:*)",
+      "Bash(xargs -r docker stop)"
+    ],
+    "additionalDirectories": [
+      "/home/edlab/mskim/picon_web/.jekyll-cache"
+    ]
+  }
+}
