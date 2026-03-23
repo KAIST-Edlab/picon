@@ -1,0 +1,68 @@
+---
+layout: default
+title: Home
+description: "PICon: A Multi-Turn Interrogation Framework for Evaluating Persona Agent Consistency"
+---
+
+<section class="hero">
+  <h1>PICon</h1>
+  <p class="tagline">
+    A multi-turn interrogation framework for evaluating whether LLM-based persona agents
+    maintain consistency under sustained, structured questioning &mdash; inspired by real-world
+    interrogation methodology.
+  </p>
+  <div class="cta-group">
+    <a href="{{ '/research/' | relative_url }}" class="btn btn-primary">Read the Research</a>
+    <a href="{{ '/demo/' | relative_url }}" class="btn btn-accent">Try the Demo</a>
+    <a href="{{ '/contact/' | relative_url }}" class="btn btn-outline">Cite / Contact</a>
+  </div>
+</section>
+
+<section class="home-section">
+  <h2>What is PICon?</h2>
+  <p>
+    LLM-based persona agents are increasingly used as proxies for real human participants in
+    medical training, social science, and product design. But how do you know if a persona agent
+    is truly consistent &mdash; or just superficially convincing?
+  </p>
+  <p>
+    <strong>PICon</strong> (<strong>P</strong>ersona <strong>I</strong>nterrogation framework for <strong>CON</strong>sistency evaluation) applies
+    principles from interrogation methodology to systematically probe persona agents through
+    logically chained multi-turn questioning, exposing contradictions that simpler evaluations miss.
+  </p>
+
+  <h2>Three Dimensions of Consistency</h2>
+  <div class="dimensions-grid">
+    <div class="dimension-card">
+      <div class="icon">&#x1f50d;</div>
+      <h4>Internal Consistency</h4>
+      <p>Freedom from self-contradiction across all preceding utterances</p>
+    </div>
+    <div class="dimension-card">
+      <div class="icon">&#x1f310;</div>
+      <h4>External Consistency</h4>
+      <p>Alignment of factual claims with real-world evidence via web search</p>
+    </div>
+    <div class="dimension-card">
+      <div class="icon">&#x1f504;</div>
+      <h4>Retest Consistency</h4>
+      <p>Stability of responses when the same questions are re-asked</p>
+    </div>
+  </div>
+
+  <h2>Key Findings</h2>
+  <div class="feature-grid">
+    <div class="feature-card">
+      <h3>Prompting beats fine-tuning</h3>
+      <p>The simplest approach wins &mdash; prompt-based persona agents outperform both fine-tuned and RAG-based systems under sustained interrogation, challenging the assumption that more complex architectures yield more consistent personas.</p>
+    </div>
+    <div class="feature-card">
+      <h3>Instability is baked in</h3>
+      <p>Some agents contradict themselves on basic demographic questions even without any prior context to confuse them &mdash; the inconsistency isn&rsquo;t situational, it&rsquo;s structural.</p>
+    </div>
+    <div class="feature-card">
+      <h3>Hidden contradictions surface under pressure</h3>
+      <p>Single-turn or pairwise checks miss contradictions that only appear when three or more statements are considered together &mdash; PICon&rsquo;s chained questioning is designed to find exactly these.</p>
+    </div>
+  </div>
+</section>

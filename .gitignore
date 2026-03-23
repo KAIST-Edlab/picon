@@ -1,0 +1,17 @@
+_site/
+.sass-cache/
+.jekyll-cache/
+.jekyll-metadata
+vendor/
+.bundle/
+node_modules/
+Gemfile.lock
+
+# API
+api/__pycache__/
+api/.env
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db

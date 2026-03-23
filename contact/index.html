@@ -1,0 +1,74 @@
+---
+layout: default
+title: Contact / Cite
+description: "Cite PICon, contact the authors, and find links to code and paper"
+---
+
+<div class="container">
+  <h1>Contact / Cite</h1>
+  <p class="subtitle">Reference this work, reach out, or explore the code</p>
+
+  <h2>Citation</h2>
+  <p>If you use PICon in your research, please cite:</p>
+
+  <div class="bibtex-block" id="bibtex">
+    <button class="copy-btn" onclick="copyBibtex()">Copy</button>
+<pre>@inproceedings{anonymous2025picon,
+  title     = {PICon: A Multi-Turn Interrogation Framework
+               for Evaluating Persona Agent Consistency},
+  author    = {Anonymous},
+  booktitle = {Proceedings of the 63rd Annual Meeting of
+               the Association for Computational
+               Linguistics (ACL)},
+  year      = {2025},
+  note      = {Under review}
+}</pre>
+  </div>
+
+  <h2>Links</h2>
+  <div class="contact-grid">
+    <div class="contact-card">
+      <h4>Paper</h4>
+      <p><a href="https://arxiv.org/abs/XXXX.XXXXX" target="_blank">arXiv preprint</a> (coming soon)</p>
+    </div>
+    <div class="contact-card">
+      <h4>Code</h4>
+      <p><a href="https://github.com/YOUR_USERNAME/picon" target="_blank">GitHub repository</a></p>
+    </div>
+    <div class="contact-card">
+      <h4>Demo</h4>
+      <p><a href="{{ '/demo/' | relative_url }}">Try PICon online</a></p>
+    </div>
+  </div>
+
+  <h2>Authors</h2>
+  <p>
+    <em>Author information will be added after the anonymous review period.</em>
+  </p>
+  <!--
+  <div class="contact-grid">
+    <div class="contact-card">
+      <h4>Author Name</h4>
+      <p>Affiliation<br>email@example.com</p>
+    </div>
+  </div>
+  -->
+
+  <h2>Contact</h2>
+  <p>
+    For questions about the framework, data, or collaboration, please open an issue on
+    <a href="https://github.com/YOUR_USERNAME/picon/issues" target="_blank">GitHub</a>
+    or email <code>your-email@example.com</code>.
+  </p>
+</div>
+
+<script>
+function copyBibtex() {
+  const text = document.querySelector('#bibtex pre').textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.querySelector('.copy-btn');
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+  });
+}
+</script>

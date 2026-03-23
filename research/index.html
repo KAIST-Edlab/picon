@@ -1,0 +1,337 @@
+---
+layout: default
+title: Research
+description: "PICon — abstract, method, evaluated targets, and results"
+---
+
+<div class="container">
+
+  <!-- ===== Header ===== -->
+  <div class="paper-header">
+    <h1>PICon: A Multi-Turn Interrogation Framework for Evaluating Persona Agent Consistency</h1>
+    <p class="subtitle">Anonymous ACL Submission</p>
+    <div class="paper-meta">
+      <span>Evaluation Framework</span>
+      <span>7 Persona Agent Groups + 63 Human Participants</span>
+      <span>3 Consistency Dimensions</span>
+    </div>
+  </div>
+
+  <!-- ===== Abstract ===== -->
+  <h2>Abstract</h2>
+  <div class="abstract-box">
+    <p>
+      Large language model (LLM)-based persona agents are rapidly being adopted as scalable
+      proxies for human participants across diverse domains. Yet there is no systematic method for
+      verifying whether a persona agent's responses remain free of contradictions and factual
+      inaccuracies throughout an interaction. A principle from interrogation methodology offers a
+      lens: no matter how elaborate a fabricated identity, systematic interrogation will expose its
+      contradictions. We apply this principle to propose <strong>PICon</strong>, an evaluation framework
+      that probes persona agents through logically chained multi-turn questioning. PICon evaluates
+      consistency along three core dimensions: <em>internal consistency</em> (freedom from
+      self-contradiction), <em>external consistency</em> (alignment with real-world facts), and
+      <em>retest consistency</em> (stability under repetition). Evaluating seven groups of persona
+      agents alongside 63 real human participants, we find that even systems previously reported as
+      highly consistent fail to meet the human baseline across all three dimensions, revealing
+      contradictions and evasive responses under chained questioning. This work provides both a
+      conceptual foundation and a practical methodology for evaluating persona agents before
+      trusting them as substitutes for human participants.
+    </p>
+  </div>
+
+  <!-- ===== Method ===== -->
+  <h2>Method</h2>
+
+  <figure>
+    <img src="{{ '/asset/fig_methods.svg' | relative_url }}" alt="PICon Framework Overview">
+    <figcaption>PICon operates in two phases &mdash; Interrogation and Evaluation.</figcaption>
+  </figure>
+
+  <h3>Phase 1: Interrogation</h3>
+  <p>
+    PICon operates as a black-box framework &mdash; no prior knowledge of the target persona is assumed.
+    The interrogation proceeds through three stages:
+  </p>
+
+  <ol class="phase-steps">
+    <li>
+      <div class="step-label">Get-to-Know</div>
+      <div class="step-desc">Predefined demographic questions from the <strong>World Values Survey (WVS)</strong> &mdash; age, occupation, economic status, family composition.</div>
+    </li>
+    <li>
+      <div class="step-label">Main Interrogation</div>
+      <div class="step-desc">
+        The <strong>Questioner</strong> generates logically chained follow-ups derived from each preceding response, progressively narrowing the space for fabrication.
+        Meanwhile, the <strong>Entity &amp; Claim Extractor</strong> identifies verifiable claims and web-searchable entities (institutions, locations, organizations) for fact-checking.
+      </div>
+    </li>
+    <li>
+      <div class="step-label">Retest</div>
+      <div class="step-desc">The initial demographic questions are re-asked after 40 turns of intervening dialogue to capture answer drift.</div>
+    </li>
+  </ol>
+
+  <div class="callout">
+    <strong>What makes PICon different:</strong> each follow-up is derived from the logical implications
+    of the previous answer &mdash; not independent or merely topically related. This chained questioning
+    is what exposes contradictions that simpler evaluations miss.
+  </div>
+
+  <h3>Phase 2: Evaluation</h3>
+  <p>
+    The <strong>Evaluator</strong> (an LLM-as-a-Judge<sup><a href="#fn1" id="ref1">1</a></sup>)
+    receives the full interrogation log and scores the persona along three dimensions:
+  </p>
+
+  <h4>Internal Consistency (IC)</h4>
+  <p>
+    For each response $r_t$, the Evaluator checks whether it contradicts <em>any</em>
+    preceding response $r_{&lt;t}$ &mdash; not just the immediately previous one. This is what
+    enables multi-hop contradiction detection: a statement that is consistent with each earlier
+    statement individually may still contradict them when considered jointly. The Evaluator also
+    flags evasive or non-substantive responses (e.g., &ldquo;I&rsquo;d rather not say&rdquo;).
+    IC is the <strong>harmonic mean</strong> of <strong>cooperativeness</strong> (fraction of substantive responses) and
+    <strong>non-contradiction rate</strong>, so a persona cannot inflate its score by refusing to engage.
+  </p>
+
+  <details class="formula-toggle">
+    <summary>Formal definition</summary>
+    <div class="formula-content">
+      <p>
+        <strong>Cooperativeness.</strong>
+        A persona agent that consistently evades questions produces no verifiable statements,
+        making consistency unmeasurable rather than high. Cooperativeness is the fraction of turns
+        with a substantive response:
+      </p>
+      <p>$$S_{\mathrm{coop}} = \frac{1}{T}\sum_{t=1}^{T}\mathbb{I}(r_t = \texttt{cooperative})$$</p>
+      <p>
+        <strong>Non-contradiction rate.</strong>
+        Defined as one minus the fraction of responses that contradict the preceding responses.
+        Since no verifiable statements exist before the first cooperative turn $t^*$, counting
+        begins from that turn onward. For each subsequent response $r_t$, the Evaluator checks
+        whether it contradicts $r_{&lt;t}$, so that contradictions requiring multiple statements to
+        surface can also be captured:
+      </p>
+      <p>$$S_{\mathrm{nc}} = 1-\frac{1}{T - t^*}\sum_{t=t^*+1}^{T}\mathbb{I}(r_t \bot r_{&lt;t})$$</p>
+      <p>where $r_t \bot r_{&lt;t}$ denotes that $r_t$ contradicts the preceding responses.</p>
+      <p>
+        The final internal consistency score (IC) is the harmonic mean of the two components:
+      </p>
+      <p>$$\mathrm{IC} = \frac{2 \cdot S_{\mathrm{coop}} \cdot S_{\mathrm{nc}}}{S_{\mathrm{coop}} + S_{\mathrm{nc}}}$$</p>
+    </div>
+  </details>
+
+  <h4>External Consistency (EC)</h4>
+  <p>
+    During interrogation, the Entity &amp; Claim Extractor pulls verifiable entities and claims
+    from each response. The Questioner web-searches each entity, then asks the persona to confirm
+    whether the retrieved evidence refers to the same entity it mentioned. For confirmed claims,
+    the Evaluator classifies each as <em>supported</em>, <em>refuted</em>, or <em>not enough
+    information</em> (NEI), following the fact-verification paradigm (Thorne et al., 2018).
+    EC is the <strong>harmonic mean</strong> of <strong>coverage</strong> (proportion of turns with verifiable claims)
+    and <strong>non-refutation rate</strong> (proportion of confirmed claims not contradicted by evidence).
+  </p>
+
+  <details class="formula-toggle">
+    <summary>Formal definition</summary>
+    <div class="formula-content">
+      <p>
+        <strong>Coverage.</strong>
+        At each turn $t$, the Extractor produces entity-claim pairs $\{(e_j, C_j)\}_j$ from the
+        response $r_t$, and the Questioner performs a web search to obtain evidence $v_j$.
+        Coverage captures the agent&rsquo;s ability to ground its responses in specific, verifiable
+        factual details. Let $T$ be the total number of turns and $T_c = \{t \mid \mathcal{E}_t \neq \emptyset\}$
+        be the set of turns with at least one extracted entity-claim pair:
+      </p>
+      <p>$$c = \frac{|T_c|}{T}$$</p>
+      <p>
+        <strong>Non-refutation rate.</strong>
+        Following the fact-verification paradigm of Thorne et al. (2018), each confirmed claim
+        ($\tilde{r}_j = 1$) is classified as <em>supported</em>, <em>refuted</em>, or <em>NEI</em>
+        against the retrieved evidence $v_j$. Let $T_v \subseteq T_c$ be the set of turns containing
+        at least one confirmed claim, and $n_t^{\mathrm{ref}}$ the number of refuted claims in turn
+        $t \in T_v$. The turn-level non-refutation rate is:
+      </p>
+      <p>$$p_t = 1 - \frac{n_t^{\mathrm{ref}}}{\sum_j\tilde{r}_j|C_j|}$$</p>
+      <p>
+        Unconfirmed claims ($\tilde{r}_j = 0$) and NEI labels are excluded, as our definition of
+        consistency requires non-refutation rather than positive verification.
+        The macro-averaged non-refutation rate over all turns with confirmed claims:
+      </p>
+      <p>$$\bar{p} = \frac{1}{|T_v|} \sum_{t \in T_v} p_t$$</p>
+      <p>
+        The external consistency score (EC) is the harmonic mean of non-refutation rate and coverage:
+      </p>
+      <p>$$\mathrm{EC} = \frac{2 \cdot \bar{p} \cdot c}{\bar{p} + c}$$</p>
+    </div>
+  </details>
+
+  <h4>Retest Consistency (RC)</h4>
+  <p>
+    The Evaluator compares the original demographic responses from Get-to-Know with the re-posed
+    responses from Retest, measuring the fraction of answers that remain consistent after 40+
+    turns of intervening dialogue.
+  </p>
+
+  <details class="formula-toggle">
+    <summary>Formal definition</summary>
+    <div class="formula-content">
+      <p>
+        The Evaluator compares the original response $r_{o}^i$ and the re-posed response $r_{re}^i$
+        for each of the $m$ demographic questions within a single session:
+      </p>
+      <p>$$\mathrm{RC} = \frac{1}{m}\sum_{i=1}^{m}\mathbb{I}(r_{o}^i \approx r_{re}^i)$$</p>
+    </div>
+  </details>
+
+  <div class="config-card">
+    <h4>Framework Configuration</h4>
+    <div class="config-grid">
+      <div class="config-item">
+        <span class="config-role">Questioner</span>
+        <span class="config-value">GPT-5</span>
+      </div>
+      <div class="config-item">
+        <span class="config-role">Entity &amp; Claim Extractor</span>
+        <span class="config-value">GPT-5.1</span>
+      </div>
+      <div class="config-item">
+        <span class="config-role">Evaluator</span>
+        <span class="config-value">Gemini-2.5-Flash</span>
+      </div>
+      <div class="config-item">
+        <span class="config-role">Session length</span>
+        <span class="config-value">50 turns (10 get-to-know + 40 main)</span>
+      </div>
+    </div>
+    <p class="config-note">Each agent role was selected through human evaluation.</p>
+  </div>
+
+  <!-- ===== Evaluated Targets ===== -->
+  <h2>Evaluated Targets</h2>
+  <p>PICon evaluates seven groups of persona agents spanning different architectures:</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Group</th>
+        <th>Type</th>
+        <th>Architecture</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>Character.ai</td><td>Commercial service</td><td>Proprietary (black-box)</td></tr>
+      <tr><td>OpenCharacter</td><td>Research</td><td>Fine-tuned</td></tr>
+      <tr><td>Consistent LLM</td><td>Research</td><td>Fine-tuned (RL)</td></tr>
+      <tr><td>Twin 2K 500</td><td>Research</td><td>Prompting</td></tr>
+      <tr><td>DeepPersona</td><td>Research</td><td>Prompting</td></tr>
+      <tr><td>Li et al. (2025)</td><td>Research</td><td>Prompting</td></tr>
+      <tr><td>Human Simulacra</td><td>Research</td><td>RAG-based</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    All groups are benchmarked against <strong>63 real human participants</strong> recruited via
+    snowball sampling across multiple countries (IRB-approved).
+  </p>
+
+  <!-- ===== Results ===== -->
+  <h2>Results</h2>
+
+  <h3>Overall Performance</h3>
+  <p>
+    No persona agent group achieved a larger normalized triangle area (IC &times; EC &times; RC)
+    than the human baseline. The three top-scoring groups rely on inference-time conditioning
+    (prompting or RAG), while the two lowest-scoring groups are both fine-tuned models.
+  </p>
+
+  <div class="figure-row" style="align-items: center;">
+    <figure style="flex: 7; min-width: 0;">
+      <img src="{{ '/asset/fig_main.svg' | relative_url }}" alt="Radar charts showing IC, EC, RC per group">
+      <figcaption>(a) Radar charts: mean IC, EC, RC for each group (dashed = std dev).</figcaption>
+    </figure>
+    <figure style="flex: 3; min-width: 0;">
+      <img src="{{ '/asset/fig_main_bar_area.svg' | relative_url }}" alt="Normalized area bar chart">
+      <figcaption>(b) Normalized triangle areas as aggregate scores.</figcaption>
+    </figure>
+  </div>
+
+  <h3>Internal Consistency</h3>
+
+  <table>
+    <thead>
+      <tr><th>Group</th><th>Internal Consistency (IC)</th><th>Non-contradiction</th><th>Cooperativeness</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Human</strong></td><td><strong>0.90 &pm; 0.05</strong></td><td>0.94 &pm; 0.05</td><td>0.86 &pm; 0.07</td></tr>
+      <tr><td>Human Simulacra</td><td>0.79 &pm; 0.13</td><td>0.88 &pm; 0.09</td><td>0.74 &pm; 0.19</td></tr>
+      <tr><td>Li et al. (2025)</td><td>0.73 &pm; 0.12</td><td>0.97 &pm; 0.03</td><td>0.60 &pm; 0.17</td></tr>
+      <tr><td>DeepPersona</td><td>0.72 &pm; 0.11</td><td>0.97 &pm; 0.03</td><td>0.57 &pm; 0.13</td></tr>
+      <tr><td>Character.ai</td><td>0.71 &pm; 0.04</td><td>0.79 &pm; 0.06</td><td>0.66 &pm; 0.07</td></tr>
+      <tr><td>Twin 2K 500</td><td>0.53 &pm; 0.16</td><td>0.98 &pm; 0.02</td><td>0.38 &pm; 0.17</td></tr>
+      <tr><td>Consistent LLM</td><td>0.31 &pm; 0.15</td><td>0.96 &pm; 0.06</td><td>0.20 &pm; 0.11</td></tr>
+      <tr><td>OpenCharacter</td><td>0.16 &pm; 0.07</td><td>0.54 &pm; 0.25</td><td>0.11 &pm; 0.05</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <strong>Key finding:</strong> OpenCharacter and Consistent LLM report high consistency in
+    their original studies, yet record the lowest IC under PICon. The reason: both maintain
+    moderate non-contradiction rates but their <em>cooperativeness collapses</em> &mdash; they
+    frequently generate responses irrelevant to the question. PICon's harmonic-mean formulation
+    appropriately penalizes such evasion.
+  </p>
+
+  <h3>External Consistency</h3>
+
+  <table>
+    <thead>
+      <tr><th>Group</th><th>External Consistency (EC)</th><th>Non-refutation</th><th>Coverage</th><th>Discarded</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>Human</strong></td><td><strong>0.66 &pm; 0.07</strong></td><td>0.95 &pm; 0.06</td><td>0.51 &pm; 0.08</td><td>0.18 &pm; 0.08</td></tr>
+      <tr><td>Character.ai</td><td>0.71 &pm; 0.07</td><td>0.79 &pm; 0.13</td><td>0.66 &pm; 0.10</td><td>0.10 &pm; 0.05</td></tr>
+      <tr><td>Human Simulacra</td><td>0.63 &pm; 0.13</td><td>0.89 &pm; 0.12</td><td>0.52 &pm; 0.15</td><td>0.33 &pm; 0.22</td></tr>
+      <tr><td>Li et al. (2025)</td><td>0.59 &pm; 0.14</td><td>0.98 &pm; 0.03</td><td>0.44 &pm; 0.17</td><td>0.13 &pm; 0.05</td></tr>
+      <tr><td>DeepPersona</td><td>0.54 &pm; 0.18</td><td>0.96 &pm; 0.04</td><td>0.40 &pm; 0.17</td><td>0.07 &pm; 0.06</td></tr>
+      <tr><td>Consistent LLM</td><td>0.30 &pm; 0.09</td><td>1.00 &pm; 0.00</td><td>0.18 &pm; 0.06</td><td>0.69 &pm; 0.10</td></tr>
+      <tr><td>Twin 2K 500</td><td>0.26 &pm; 0.17</td><td>1.00 &pm; 0.01</td><td>0.16 &pm; 0.13</td><td>0.09 &pm; 0.09</td></tr>
+      <tr><td>OpenCharacter</td><td>0.15 &pm; 0.14</td><td>0.70 &pm; 0.49</td><td>0.09 &pm; 0.07</td><td>0.77 &pm; 0.32</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    Coverage is universally low because interrogation targets personal memories and experiences
+    &mdash; claims that are inherently harder to verify via web search. Character.ai achieves the
+    highest EC, likely because its personas are based on real public figures with extensive web
+    presence.
+  </p>
+
+  <h3>Retest Consistency</h3>
+  <p>
+    Human Simulacra achieved the highest retest consistency (0.87 &pm; 0.11), closest to the
+    human baseline. Under greedy decoding with shuffled question order, most groups maintained
+    or improved their RC, suggesting that stochastic decoding is a primary source of retest
+    instability.
+  </p>
+
+  <h3>Summary</h3>
+  <p>
+    Fine-tuning for persona does not guarantee robust consistency under chained interrogation.
+    The results suggest that inference-time conditioning (prompting, RAG) currently offers more
+    reliable consistency than specialized fine-tuning, though no approach matches human-level
+    performance across all three dimensions.
+  </p>
+
+  <!-- ===== Footnotes ===== -->
+  <hr style="margin: 2rem 0 1rem; border: none; border-top: 1px solid var(--color-border);">
+  <p class="footnote" id="fn1" style="font-size: 0.8125rem; color: var(--color-text-muted);">
+    <sup>1</sup> The Evaluator (Gemini-2.5-Flash) achieves a Gwet&rsquo;s AC1 of 0.829 against human
+    annotators, compared to 0.885 inter-annotator agreement &mdash; indicating near-human-level
+    reliability. <a href="#ref1">&uarr;</a>
+  </p>
+
+  <div class="page-nav">
+    <a href="{{ '/demo/' | relative_url }}" class="btn btn-accent">Try the Demo &rarr;</a>
+  </div>
+</div>

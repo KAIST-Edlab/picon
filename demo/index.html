@@ -1,0 +1,253 @@
+---
+layout: default
+title: Demo
+description: "Try PICon — experience the interrogation yourself or test your own persona agent"
+layout_js: /assets/js/demo.js
+---
+
+<div class="container-wide">
+  <h1>Demo</h1>
+  <p class="subtitle">Experience the PICon interrogation, test your own persona agent, or browse the leaderboard</p>
+
+  <!-- Mode Tabs -->
+  <div class="demo-tabs">
+    <button class="demo-tab active" data-tab="experience">Experience Mode</button>
+    <button class="demo-tab" data-tab="agent-test">Agent Test</button>
+    <button class="demo-tab" data-tab="leaderboard">Leaderboard</button>
+  </div>
+
+  <!-- ===== Experience Mode ===== -->
+  <div class="demo-panel active" id="panel-experience">
+    <div class="demo-description">
+      <strong>Experience the interrogation yourself.</strong>
+      You play as a persona being interrogated by PICon's multi-turn questioning system.
+      Answer as yourself &mdash; PICon will probe your responses with logically chained follow-ups
+      and verify factual claims in real time. At the end, you'll see your consistency scores across
+      all three dimensions.
+    </div>
+
+    <!-- Name entry -->
+    <div id="exp-start" class="agent-form">
+      <div class="form-group">
+        <label for="exp-name">Your name</label>
+        <input type="text" id="exp-name" placeholder="Enter your name to begin">
+      </div>
+      <button class="btn btn-primary" id="exp-start-btn">Start Interview</button>
+    </div>
+
+    <!-- Chat -->
+    <div id="exp-chat" style="display:none;">
+      <div class="chat-container">
+        <div class="chat-header">
+          <h4>PICon Interview</h4>
+          <span class="chat-progress" id="exp-progress"></span>
+        </div>
+        <div class="chat-messages" id="exp-messages"></div>
+        <div class="chat-input">
+          <input type="text" id="exp-input" placeholder="Type your response..." autocomplete="off">
+          <button id="exp-send" disabled>Send</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Results card (shown after completion) -->
+    <div id="exp-results" style="display:none;">
+      <div class="results-card">
+        <h3>Your Consistency Report</h3>
+        <div class="score-grid" id="exp-score-grid"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Agent Test Mode ===== -->
+  <div class="demo-panel" id="panel-agent-test">
+    <div class="demo-description">
+      <strong>Test your own persona agent.</strong>
+      Provide your agent's API endpoint (OpenAI chat-completions compatible) along with a persona
+      description. PICon will run the full interrogation pipeline and return a detailed consistency
+      report. Results are automatically added to the leaderboard.
+    </div>
+
+    <div class="agent-form" id="agent-form">
+      <div class="form-row">
+        <div class="form-group" style="flex:1;">
+          <label for="agent-name">Agent Name</label>
+          <input type="text" id="agent-name" placeholder="e.g. MyPersonaBot v2">
+        </div>
+        <div class="form-group" style="flex:1;">
+          <label for="agent-model">Model</label>
+          <input type="text" id="agent-model" placeholder="e.g. gpt-4o, gemini-2.5-flash">
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="agent-endpoint">Agent API Endpoint <span class="label-hint">(OpenAI-compatible chat completions)</span></label>
+        <input type="url" id="agent-endpoint" placeholder="https://your-agent.example.com/v1/chat/completions">
+      </div>
+      <div class="form-group">
+        <label for="agent-api-key">API Key <span class="label-hint">(optional)</span></label>
+        <input type="password" id="agent-api-key" placeholder="Bearer token or API key">
+      </div>
+      <div class="form-group">
+        <label for="agent-persona">Persona / System Prompt</label>
+        <textarea id="agent-persona" rows="5" placeholder="Paste the system prompt that defines your agent's persona. This is sent as the system message and also helps PICon contextualize the evaluation."></textarea>
+      </div>
+      <div class="form-row">
+        <div class="form-group" style="flex:1;">
+          <label for="agent-turns">Interrogation Turns</label>
+          <select id="agent-turns">
+            <option value="20">20 turns (quick)</option>
+            <option value="30" selected>30 turns (standard)</option>
+            <option value="50">50 turns (thorough)</option>
+          </select>
+        </div>
+        <div class="form-group" style="flex:1;">
+          <label for="agent-sessions">Sessions</label>
+          <select id="agent-sessions">
+            <option value="1">1 session</option>
+            <option value="2" selected>2 sessions (recommended)</option>
+            <option value="3">3 sessions</option>
+          </select>
+        </div>
+      </div>
+      <button class="btn btn-accent" id="agent-start-btn">Run PICon Evaluation</button>
+    </div>
+
+    <!-- Agent test live log -->
+    <div id="agent-log" style="display:none;">
+      <div class="chat-container">
+        <div class="chat-header">
+          <h4>PICon Evaluation</h4>
+          <span class="chat-progress" id="agent-progress">Initializing...</span>
+        </div>
+        <div class="chat-messages" id="agent-messages"></div>
+      </div>
+      <button class="btn btn-secondary" id="agent-cancel-btn" style="margin-top:0.75rem;">Cancel</button>
+    </div>
+
+    <!-- Agent results -->
+    <div id="agent-results" style="display:none;">
+      <div class="results-card">
+        <h3>Evaluation Report</h3>
+        <div class="score-grid" id="agent-score-grid"></div>
+        <p class="results-note">Your agent has been added to the leaderboard.</p>
+      </div>
+      <button class="btn btn-primary" id="agent-retry-btn" style="margin-top:0.75rem;">Test Another Agent</button>
+    </div>
+  </div>
+
+  <!-- ===== Leaderboard ===== -->
+  <div class="demo-panel" id="panel-leaderboard">
+    <div class="demo-description">
+      <strong>PICon Consistency Leaderboard.</strong>
+      Baseline scores from the paper's evaluation targets, plus community-submitted agents.
+      All agents are evaluated under the same interrogation protocol (50 turns, 2 sessions).
+    </div>
+
+    <div class="leaderboard-controls">
+      <div class="leaderboard-filter">
+        <label>Sort by</label>
+        <select id="lb-sort">
+          <option value="area" selected>Overall (Area)</option>
+          <option value="ic">Internal Consistency</option>
+          <option value="ec">External Consistency</option>
+          <option value="rc">Retest Consistency</option>
+        </select>
+      </div>
+      <div class="leaderboard-filter">
+        <label>Type</label>
+        <select id="lb-type-filter">
+          <option value="all" selected>All</option>
+          <option value="baseline">Baseline (Paper)</option>
+          <option value="community">Community</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="leaderboard-table-wrap">
+      <table class="leaderboard-table" id="leaderboard-table">
+        <thead>
+          <tr>
+            <th class="lb-rank">#</th>
+            <th class="lb-name">Agent</th>
+            <th class="lb-type">Type</th>
+            <th class="lb-score sortable" data-col="ic">IC</th>
+            <th class="lb-score sortable" data-col="ec">EC</th>
+            <th class="lb-score sortable" data-col="rc">RC</th>
+            <th class="lb-score sortable active" data-col="area">Area</th>
+          </tr>
+        </thead>
+        <tbody id="leaderboard-body"></tbody>
+      </table>
+    </div>
+
+    <p class="leaderboard-footnote">
+      <strong>IC</strong> = Internal Consistency (harmonic mean of non-contradiction &amp; cooperativeness).
+      <strong>EC</strong> = External Consistency (harmonic mean of non-refutation &amp; coverage).
+      <strong>RC</strong> = Retest Consistency (inter-session stability).
+      <strong>Area</strong> = normalized triangle area on the IC&ndash;EC&ndash;RC radar chart.
+    </p>
+  </div>
+</div>
+
+<!-- ===== Use via Python ===== -->
+<div class="container" style="margin-top: 3rem;">
+  <div class="python-api-section">
+    <h2>Use via Python</h2>
+    <p>
+      Install the <code>picon</code> package to run evaluations programmatically &mdash;
+      no web UI needed.
+    </p>
+
+    <div class="code-block">
+      <div class="code-header">Installation</div>
+      <pre><code>pip install picon</code></pre>
+    </div>
+
+    <div class="code-block">
+      <div class="code-header">Quick Start</div>
+      <pre><code>import picon
+
+result = picon.run(
+    persona="You are a 35-year-old software engineer named John...",
+    name="John",
+    model="gemini/gemini-2.5-flash",
+    num_turns=20,
+    num_sessions=2,
+    do_eval=True,
+)
+
+print(result.eval_scores)
+# {
+#   "internal_harmonic_mean": 0.85,
+#   "internal_responsiveness": 0.90,
+#   "internal_consistency": 0.81,
+#   "external_wilson": 0.72,
+#   "inter_session_stability": 0.88,
+#   "intra_session_stability": 0.91,
+# }
+result.save("results/john.json")</code></pre>
+    </div>
+
+    <div class="code-block">
+      <div class="code-header">Self-Hosted Model</div>
+      <pre><code>result = picon.run(
+    persona="",                                # server manages persona
+    name="Llama3",
+    model="meta-llama/Llama-3-8B",
+    api_base="http://localhost:8000/v1",       # OpenAI-compatible endpoint
+    num_turns=30,
+)</code></pre>
+    </div>
+
+    <div class="code-block">
+      <div class="code-header">Evaluate Existing Results</div>
+      <pre><code>scores = picon.evaluate("results/john.json")
+print(scores)</code></pre>
+    </div>
+
+    <p style="margin-top:1rem; font-size:0.875rem; color:var(--color-text-muted);">
+      See the <a href="https://github.com/YOUR_USERNAME/picon">GitHub repository</a>
+      for full documentation, CLI usage, and advanced configuration.
+    </p>
+  </div>
+</div>
