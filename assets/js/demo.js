@@ -228,7 +228,8 @@
     var sessions = document.getElementById('agent-sessions').value;
 
     if (!name) { alert('Please provide an agent name.'); return; }
-    if (!endpoint) { alert('Please provide your agent\'s API endpoint.'); return; }
+    if (!model) { alert('Please provide a model name (e.g. gpt-4o, gemini/gemini-2.5-flash).'); return; }
+    if (!apiKey) { alert('Please provide an API key for the model provider. You will be billed for the evaluation cost.'); return; }
     if (!persona) { alert('Please provide a persona / system prompt.'); return; }
 
     if (!API_BASE) {

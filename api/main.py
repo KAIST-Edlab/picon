@@ -459,20 +459,44 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
 
     job = agent_jobs[job_id]
 
+    def _run_with_user_key():
+        """Run picon.run() with the user's API key set in env."""
+        # Temporarily override API keys so picon's pipeline agents
+        # use the user's key instead of the server's
+        old_env = {}
+        if req.api_key:
+            for key in ("OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+                old_env[key] = os.environ.get(key)
+            # Detect provider from model name and set the right key
+            model_lower = (req.model or "").lower()
+            if "gemini" in model_lower:
+                os.environ["GEMINI_API_KEY"] = req.api_key
+                os.environ["GOOGLE_API_KEY"] = req.api_key
+            else:
+                os.environ["OPENAI_API_KEY"] = req.api_key
+        try:
+            return picon.run(
+                persona=req.persona,
+                name=req.name,
+                model=req.model or "openai/custom",
+                api_base=req.api_base or None,
+                api_key=req.api_key or None,
+                num_turns=req.num_turns,
+                num_sessions=req.num_sessions,
+                do_eval=True,
+                output_dir="/tmp/picon_results",
+                **PICON_AGENT_MODELS,
+            )
+        finally:
+            # Restore original env
+            for key, val in old_env.items():
+                if val is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = val
+
     try:
-        result = await asyncio.to_thread(
-            picon.run,
-            persona=req.persona,
-            name=req.name,
-            model=req.model or "openai/custom",
-            api_base=req.api_base,
-            api_key=req.api_key or None,
-            num_turns=req.num_turns,
-            num_sessions=req.num_sessions,
-            do_eval=True,
-            output_dir="/tmp/picon_results",
-            **PICON_AGENT_MODELS,
-        )
+        result = await asyncio.to_thread(_run_with_user_key)
 
         if result.success:
             scores = result.eval_scores or {}
