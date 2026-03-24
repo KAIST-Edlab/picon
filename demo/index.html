@@ -80,12 +80,12 @@ layout_js: /assets/js/demo.js
         </div>
       </div>
       <div class="form-group">
-        <label for="agent-endpoint">Agent API Endpoint <span class="label-hint">(optional — only for self-hosted endpoints)</span></label>
-        <input type="url" id="agent-endpoint" placeholder="e.g. http://localhost:8000/v1 (leave blank for cloud APIs like OpenAI, Gemini)">
+        <label for="agent-endpoint">Agent API Endpoint <span class="label-hint">(optional — only needed for self-hosted models)</span></label>
+        <input type="url" id="agent-endpoint" placeholder="Leave blank for cloud APIs (OpenAI, Gemini). For self-hosted: http://your-server/v1">
       </div>
       <div class="form-group">
-        <label for="agent-api-key">API Key <span class="label-hint">(optional — only for self-hosted endpoints)</span></label>
-        <input type="password" id="agent-api-key" placeholder="Bearer token or API key for your endpoint">
+        <label for="agent-api-key">API Key <span class="label-hint">(required — you pay for the evaluation cost)</span></label>
+        <input type="password" id="agent-api-key" placeholder="Your API key (e.g. OpenAI, Gemini)">
       </div>
       <div class="form-group">
         <label for="agent-persona">Persona / System Prompt <span class="label-hint">(required)</span></label>
