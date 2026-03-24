@@ -40,6 +40,14 @@ redis_client: Optional[redis.Redis] = None
 
 JOB_TTL = 86400  # 24 hours
 
+# Agent model configuration for picon pipeline
+PICON_AGENT_MODELS = {
+    "questioner_model": os.getenv("PICON_QUESTIONER_MODEL", "gpt-5"),
+    "extractor_model": os.getenv("PICON_EXTRACTOR_MODEL", "gpt-5.1"),
+    "web_search_model": os.getenv("PICON_WEB_SEARCH_MODEL", "gpt-5"),
+    "evaluator_model": os.getenv("PICON_EVALUATOR_MODEL", "gemini/gemini-2.5-flash"),
+}
+
 
 def get_redis() -> redis.Redis:
     global redis_client
@@ -320,6 +328,7 @@ async def _run_experience_session(
             num_sessions=1,  # single session for experience mode
             do_eval=True,
             output_dir="/tmp/picon_results",
+            **PICON_AGENT_MODELS,
         )
 
         scores = result.eval_scores or {}
@@ -464,6 +473,7 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
             num_sessions=req.num_sessions,
             do_eval=True,
             output_dir="/tmp/picon_results",
+            **PICON_AGENT_MODELS,
         )
 
         if result.success:
