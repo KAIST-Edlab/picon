@@ -13,14 +13,14 @@
   // IC = Internal Consistency, EC = External Consistency, RC = Retest Consistency
   // Area = normalized triangle area on IC-EC-RC radar chart
   var BASELINES = [
-    { name: 'Human',           type: 'baseline',   arch: 'Baseline',    ic: 0.90, ec: 0.66, rc: 0.94 },
-    { name: 'Human Simulacra', type: 'baseline',   arch: 'RAG',         ic: 0.79, ec: 0.63, rc: 0.87 },
-    { name: 'Li et al. (2025)',type: 'baseline',   arch: 'Prompting',   ic: 0.73, ec: 0.59, rc: 0.98 },
-    { name: 'DeepPersona',     type: 'baseline',   arch: 'Prompting',   ic: 0.72, ec: 0.54, rc: 0.92 },
-    { name: 'Character.ai',    type: 'baseline',   arch: 'Commercial',  ic: 0.71, ec: 0.71, rc: 0.46 },
-    { name: 'Twin 2K 500',     type: 'baseline',   arch: 'Prompting',   ic: 0.53, ec: 0.26, rc: 0.95 },
-    { name: 'Consistent LLM',  type: 'baseline',   arch: 'Fine-tuned',  ic: 0.31, ec: 0.30, rc: 0.14 },
-    { name: 'OpenCharacter',   type: 'baseline',   arch: 'Fine-tuned',  ic: 0.16, ec: 0.15, rc: 0.14 },
+    { name: 'Human',           type: 'baseline',   arch: 'Baseline',    turns: 50, ic: 0.90, ec: 0.66, rc: 0.94 },
+    { name: 'Human Simulacra', type: 'baseline',   arch: 'RAG',         turns: 50, ic: 0.79, ec: 0.63, rc: 0.87 },
+    { name: 'Li et al. (2025)',type: 'baseline',   arch: 'Prompting',   turns: 50, ic: 0.73, ec: 0.59, rc: 0.98 },
+    { name: 'DeepPersona',     type: 'baseline',   arch: 'Prompting',   turns: 50, ic: 0.72, ec: 0.54, rc: 0.92 },
+    { name: 'Character.ai',    type: 'baseline',   arch: 'Commercial',  turns: 50, ic: 0.71, ec: 0.71, rc: 0.46 },
+    { name: 'Twin 2K 500',     type: 'baseline',   arch: 'Prompting',   turns: 50, ic: 0.53, ec: 0.26, rc: 0.95 },
+    { name: 'Consistent LLM',  type: 'baseline',   arch: 'Fine-tuned',  turns: 50, ic: 0.31, ec: 0.30, rc: 0.14 },
+    { name: 'OpenCharacter',   type: 'baseline',   arch: 'Fine-tuned',  turns: 50, ic: 0.16, ec: 0.15, rc: 0.14 },
   ];
 
   // Compute normalized triangle area: (IC*EC + EC*RC + RC*IC) / 3
@@ -387,6 +387,7 @@
         '<td class="lb-rank ' + rankClass + '">' + rank + '</td>' +
         '<td class="lb-name">' + d.name + '</td>' +
         '<td class="lb-type"><span class="lb-badge ' + badgeClass + '">' + d.arch + '</span></td>' +
+        '<td class="lb-turns">' + (d.turns || '—') + '</td>' +
         '<td class="lb-score">' + fmtScore(d.ic) + '</td>' +
         '<td class="lb-score">' + fmtScore(d.ec) + '</td>' +
         '<td class="lb-score">' + fmtScore(d.rc) + '</td>' +
