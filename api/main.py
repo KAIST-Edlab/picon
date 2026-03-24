@@ -215,7 +215,7 @@ async def experience_start(req: ExperienceStartRequest):
     )
     session["task"] = task
 
-    # Wait for the first question to arrive from picon
+    # Wait for the first message from picon (the instruction/welcome message)
     try:
         first_q = await asyncio.to_thread(
             session["question_queue"].get, timeout=60
@@ -229,9 +229,25 @@ async def experience_start(req: ExperienceStartRequest):
         error = session.get("error") or "Interview failed to start"
         raise HTTPException(status_code=500, detail=error)
 
+    # The first message is the instruction/welcome — auto-respond to unblock picon,
+    # then wait for the actual first question
+    session["response_queue"].put("OK, I understand. Let's begin.")
+
+    try:
+        real_first_q = await asyncio.to_thread(
+            session["question_queue"].get, timeout=120
+        )
+    except queue.Empty:
+        error = session.get("error") or "Timeout waiting for first question after instruction"
+        raise HTTPException(status_code=500, detail=error)
+
+    if real_first_q.get("question") == "__COMPLETE__":
+        error = session.get("error") or "Interview failed to start"
+        raise HTTPException(status_code=500, detail=error)
+
     return {
         "session_id": session_id,
-        "first_question": first_q["question"],
+        "first_question": real_first_q["question"],
         "progress": session["progress"],
     }
 
