@@ -110,7 +110,7 @@ agent_jobs: Dict[str, dict] = {}
 
 class ExperienceStartRequest(BaseModel):
     name: str
-    num_turns: int = 30
+    num_turns: int = 50
 
 
 class ExperienceRespondRequest(BaseModel):
@@ -124,7 +124,7 @@ class AgentStartRequest(BaseModel):
     api_base: Optional[str] = None
     api_key: Optional[str] = None
     persona: str
-    num_turns: int = 30
+    num_turns: int = 50
     num_sessions: int = 2
 
 
@@ -374,7 +374,6 @@ async def agent_start(req: AgentStartRequest):
         "current_turn": 0,
         "total_turns": req.num_turns,
         "is_complete": False,
-        "latest_exchange": None,
         "result": None,
         "error": None,
     }
@@ -411,7 +410,6 @@ async def agent_status(job_id: str):
         "current_turn": job["current_turn"],
         "total_turns": job["total_turns"],
         "is_complete": job["is_complete"],
-        "latest_exchange": job["latest_exchange"],
         "error": job["error"],
     }
 
@@ -459,44 +457,20 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
 
     job = agent_jobs[job_id]
 
-    def _run_with_user_key():
-        """Run picon.run() with the user's API key set in env."""
-        # Temporarily override API keys so picon's pipeline agents
-        # use the user's key instead of the server's
-        old_env = {}
-        if req.api_key:
-            for key in ("OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
-                old_env[key] = os.environ.get(key)
-            # Detect provider from model name and set the right key
-            model_lower = (req.model or "").lower()
-            if "gemini" in model_lower:
-                os.environ["GEMINI_API_KEY"] = req.api_key
-                os.environ["GOOGLE_API_KEY"] = req.api_key
-            else:
-                os.environ["OPENAI_API_KEY"] = req.api_key
-        try:
-            return picon.run(
-                persona=req.persona,
-                name=req.name,
-                model=req.model or "openai/custom",
-                api_base=req.api_base or None,
-                api_key=req.api_key or None,
-                num_turns=req.num_turns,
-                num_sessions=req.num_sessions,
-                do_eval=True,
-                output_dir="/tmp/picon_results",
-                **PICON_AGENT_MODELS,
-            )
-        finally:
-            # Restore original env
-            for key, val in old_env.items():
-                if val is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = val
-
     try:
-        result = await asyncio.to_thread(_run_with_user_key)
+        result = await asyncio.to_thread(
+            picon.run,
+            persona=req.persona,
+            name=req.name,
+            model=req.model or "openai/custom",
+            api_base=req.api_base or None,
+            api_key=req.api_key or None,
+            num_turns=req.num_turns,
+            num_sessions=req.num_sessions,
+            do_eval=True,
+            output_dir="/tmp/picon_results",
+            **PICON_AGENT_MODELS,
+        )
 
         if result.success:
             scores = result.eval_scores or {}
@@ -574,6 +548,19 @@ def _add_to_leaderboard(name: str, model: str, scores: dict):
         r.rpush("leaderboard:community", json.dumps(entry))
     except Exception as e:
         logger.warning("Failed to add leaderboard entry: %s", e)
+
+
+@app.delete("/api/leaderboard/latest")
+async def delete_latest_leaderboard():
+    """Remove the most recent community leaderboard entry."""
+    try:
+        r = get_redis()
+        removed = r.rpop("leaderboard:community")
+        if removed:
+            return {"removed": json.loads(removed)}
+        return {"removed": None, "message": "Leaderboard is empty"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ===========================================================================

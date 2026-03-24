@@ -282,11 +282,6 @@
           'Session ' + data.current_session + '/' + data.total_sessions +
           ' — Turn ' + data.current_turn + '/' + data.total_turns;
 
-        if (data.latest_exchange) {
-          addMessage(agentMessages, 'system', 'Q: ' + data.latest_exchange.question);
-          addMessage(agentMessages, 'user', 'A: ' + data.latest_exchange.answer);
-        }
-
         if (data.is_complete) {
           clearInterval(interval);
           agentProgress.textContent = 'Complete';
