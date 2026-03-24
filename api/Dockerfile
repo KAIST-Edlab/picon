@@ -2,6 +2,9 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Limit OpenBLAS threads for constrained environments
+ENV OPENBLAS_NUM_THREADS=1
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git build-essential \

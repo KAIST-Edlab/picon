@@ -71,25 +71,25 @@ layout_js: /assets/js/demo.js
     <div class="agent-form" id="agent-form">
       <div class="form-row">
         <div class="form-group" style="flex:1;">
-          <label for="agent-name">Agent Name</label>
+          <label for="agent-name">Agent Name <span class="label-hint">(required)</span></label>
           <input type="text" id="agent-name" placeholder="e.g. MyPersonaBot v2">
         </div>
         <div class="form-group" style="flex:1;">
-          <label for="agent-model">Model</label>
-          <input type="text" id="agent-model" placeholder="e.g. gpt-4o, gemini-2.5-flash">
+          <label for="agent-model">Model <span class="label-hint">(required)</span></label>
+          <input type="text" id="agent-model" placeholder="e.g. gpt-4o, gemini/gemini-2.5-flash">
         </div>
       </div>
       <div class="form-group">
-        <label for="agent-endpoint">Agent API Endpoint <span class="label-hint">(OpenAI-compatible chat completions)</span></label>
-        <input type="url" id="agent-endpoint" placeholder="https://your-agent.example.com/v1/chat/completions">
+        <label for="agent-endpoint">Agent API Endpoint <span class="label-hint">(optional — only for self-hosted endpoints)</span></label>
+        <input type="url" id="agent-endpoint" placeholder="e.g. http://localhost:8000/v1 (leave blank for cloud APIs like OpenAI, Gemini)">
       </div>
       <div class="form-group">
-        <label for="agent-api-key">API Key <span class="label-hint">(optional)</span></label>
-        <input type="password" id="agent-api-key" placeholder="Bearer token or API key">
+        <label for="agent-api-key">API Key <span class="label-hint">(optional — only for self-hosted endpoints)</span></label>
+        <input type="password" id="agent-api-key" placeholder="Bearer token or API key for your endpoint">
       </div>
       <div class="form-group">
-        <label for="agent-persona">Persona / System Prompt</label>
-        <textarea id="agent-persona" rows="5" placeholder="Paste the system prompt that defines your agent's persona. This is sent as the system message and also helps PICon contextualize the evaluation."></textarea>
+        <label for="agent-persona">Persona / System Prompt <span class="label-hint">(required)</span></label>
+        <textarea id="agent-persona" rows="5" placeholder="Paste the system prompt that defines your agent's persona. This is sent as the system message and also used by PICon for evaluation."></textarea>
       </div>
       <div class="form-row">
         <div class="form-group" style="flex:1;">

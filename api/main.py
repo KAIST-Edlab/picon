@@ -121,7 +121,7 @@ class ExperienceRespondRequest(BaseModel):
 class AgentStartRequest(BaseModel):
     name: str
     model: str = ""
-    api_base: str
+    api_base: Optional[str] = None
     api_key: Optional[str] = None
     persona: str
     num_turns: int = 30
@@ -360,8 +360,6 @@ async def agent_start(req: AgentStartRequest):
     """Start a background picon.run() evaluation against an external agent."""
     if not req.name:
         raise HTTPException(status_code=400, detail="Agent name is required")
-    if not req.api_base:
-        raise HTTPException(status_code=400, detail="API endpoint is required")
     if not req.persona:
         raise HTTPException(status_code=400, detail="Persona / system prompt is required")
 
