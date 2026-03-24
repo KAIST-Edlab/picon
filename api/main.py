@@ -202,7 +202,7 @@ async def experience_start(req: ExperienceStartRequest):
         "result": None,
         "error": None,
         "name": req.name,
-        "turn_count": 0,
+        "turn_count": -1,
     }
     sessions[session_id] = session
 
