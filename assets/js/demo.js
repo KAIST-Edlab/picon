@@ -348,6 +348,7 @@
 
   var currentSort = 'area';
   var currentFilter = 'all';
+  var currentTurnsFilter = 'all';
 
   function getAllEntries() {
     return BASELINES.concat(communityEntries);
@@ -356,9 +357,15 @@
   function renderLeaderboard() {
     var entries = getAllEntries();
 
-    // Filter
+    // Filter by type
     if (currentFilter !== 'all') {
       entries = entries.filter(function (d) { return d.type === currentFilter; });
+    }
+
+    // Filter by turns
+    if (currentTurnsFilter !== 'all') {
+      var turnsVal = parseInt(currentTurnsFilter);
+      entries = entries.filter(function (d) { return d.turns === turnsVal; });
     }
 
     // Sort descending
@@ -418,6 +425,11 @@
 
   document.getElementById('lb-type-filter').addEventListener('change', function () {
     currentFilter = this.value;
+    renderLeaderboard();
+  });
+
+  document.getElementById('lb-turns-filter').addEventListener('change', function () {
+    currentTurnsFilter = this.value;
     renderLeaderboard();
   });
 

@@ -488,7 +488,7 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
             job["is_complete"] = True
 
             # Save to leaderboard in Redis
-            _add_to_leaderboard(req.name, req.model, job["result"])
+            _add_to_leaderboard(req.name, req.model, job["result"], req.num_turns)
 
             logger.info("Agent eval complete for %s: %s", req.name, job["result"])
         else:
@@ -531,7 +531,7 @@ async def get_leaderboard():
         return {"entries": []}
 
 
-def _add_to_leaderboard(name: str, model: str, scores: dict):
+def _add_to_leaderboard(name: str, model: str, scores: dict, turns: int = 50):
     """Add a completed evaluation to the community leaderboard in Redis."""
     try:
         r = get_redis()
@@ -540,6 +540,7 @@ def _add_to_leaderboard(name: str, model: str, scores: dict):
             "model": model,
             "type": "community",
             "arch": "Community",
+            "turns": turns,
             "ic": scores.get("ic") or 0,
             "ec": scores.get("ec") or 0,
             "rc": scores.get("rc") or 0,
