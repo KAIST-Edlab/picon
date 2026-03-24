@@ -138,20 +138,17 @@ async def bridge_chat_completions(session_id: str, request: Request):
     body = await request.json()
     messages = body.get("messages", [])
 
-    # The last assistant-role or system-role message typically contains the question,
-    # but picon sends the full conversation. The last user message is what picon
-    # expects us to generate. We need to extract what picon is asking.
-    # In practice, picon sends messages and expects a user (interviewee) response.
-    # The question is usually the last message from the questioner.
-    last_non_user = ""
+    # Picon sends questions as the "user" role (picon is the interviewer).
+    # Extract the last user message as the question to display.
+    last_question = ""
     for msg in reversed(messages):
-        if msg.get("role") in ("system", "assistant"):
-            last_non_user = msg.get("content", "")
+        if msg.get("role") == "user":
+            last_question = msg.get("content", "")
             break
 
     # Put the question in the queue for the browser to pick up
     session["question_queue"].put({
-        "question": last_non_user,
+        "question": last_question,
         "messages": messages,
         "turn": session.get("turn_count", 0),
     })
@@ -229,25 +226,9 @@ async def experience_start(req: ExperienceStartRequest):
         error = session.get("error") or "Interview failed to start"
         raise HTTPException(status_code=500, detail=error)
 
-    # The first message is the instruction/welcome — auto-respond to unblock picon,
-    # then wait for the actual first question
-    session["response_queue"].put("OK, I understand. Let's begin.")
-
-    try:
-        real_first_q = await asyncio.to_thread(
-            session["question_queue"].get, timeout=120
-        )
-    except queue.Empty:
-        error = session.get("error") or "Timeout waiting for first question after instruction"
-        raise HTTPException(status_code=500, detail=error)
-
-    if real_first_q.get("question") == "__COMPLETE__":
-        error = session.get("error") or "Interview failed to start"
-        raise HTTPException(status_code=500, detail=error)
-
     return {
         "session_id": session_id,
-        "first_question": real_first_q["question"],
+        "first_question": first_q["question"],
         "progress": session["progress"],
     }
 
