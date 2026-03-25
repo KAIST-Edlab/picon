@@ -214,9 +214,10 @@
 
   // ===== Agent Test Mode =====
 
-  var agentMessages = document.getElementById('agent-messages');
+  var agentTerminal = document.getElementById('agent-terminal-body');
   var agentProgress = document.getElementById('agent-progress');
   var agentSessionId = null;
+  var agentLogIndex = 0;  // track how many log lines we've fetched
 
   document.getElementById('agent-start-btn').addEventListener('click', async function () {
     var name = document.getElementById('agent-name').value.trim();
@@ -239,8 +240,10 @@
 
     document.getElementById('agent-form').style.display = 'none';
     document.getElementById('agent-log').style.display = 'block';
+    agentTerminal.textContent = '';
+    agentLogIndex = 0;
 
-    addMessage(agentMessages, 'info', 'Connecting to ' + name + ' (' + model + ')...');
+    appendTerminal('$ picon.run(' + name + ', model=' + model + ', turns=' + turns + ')\n');
     agentProgress.textContent = 'Starting evaluation...';
 
     try {
@@ -261,19 +264,39 @@
       if (!res.ok) throw new Error('Failed to start: ' + res.status);
       var data = await res.json();
       agentSessionId = data.session_id;
-      addMessage(agentMessages, 'info', 'Evaluation started. This may take several minutes...');
+      appendTerminal('Evaluation started. This may take several minutes...\n\n');
 
-      // Poll for progress
+      // Poll for progress and logs
       pollAgentProgress(data.session_id);
     } catch (err) {
-      addMessage(agentMessages, 'info', 'Error: ' + err.message);
+      appendTerminal('ERROR: ' + err.message + '\n');
       agentProgress.textContent = 'Error';
     }
   });
 
+  function appendTerminal(text) {
+    agentTerminal.textContent += text;
+    agentTerminal.scrollTop = agentTerminal.scrollHeight;
+  }
+
+  async function fetchAgentLogs(sessionId) {
+    try {
+      var res = await fetch(API_BASE + '/api/agent/logs/' + sessionId + '?since=' + agentLogIndex);
+      if (!res.ok) return;
+      var data = await res.json();
+      if (data.lines && data.lines.length > 0) {
+        appendTerminal(data.lines.join('\n') + '\n');
+        agentLogIndex = data.total;
+      }
+    } catch (e) { /* ignore */ }
+  }
+
   async function pollAgentProgress(sessionId) {
     var interval = setInterval(async function () {
       try {
+        // Fetch logs and status in parallel
+        await fetchAgentLogs(sessionId);
+
         var res = await fetch(API_BASE + '/api/agent/status/' + sessionId);
         if (!res.ok) { clearInterval(interval); return; }
         var data = await res.json();
@@ -284,8 +307,18 @@
 
         if (data.is_complete) {
           clearInterval(interval);
+
+          // Fetch final logs
+          await fetchAgentLogs(sessionId);
+
+          if (data.error) {
+            agentProgress.textContent = 'Error';
+            appendTerminal('\nERROR: ' + data.error + '\n');
+            return;
+          }
+
           agentProgress.textContent = 'Complete';
-          addMessage(agentMessages, 'info', 'Evaluation complete! Processing results...');
+          appendTerminal('\n--- Evaluation complete ---\n');
 
           // Fetch results
           var rRes = await fetch(API_BASE + '/api/agent/results/' + sessionId);
@@ -315,9 +348,9 @@
         }
       } catch (err) {
         clearInterval(interval);
-        addMessage(agentMessages, 'info', 'Error polling status: ' + err.message);
+        appendTerminal('\nERROR: ' + err.message + '\n');
       }
-    }, 5000);
+    }, 3000);
   }
 
   // Cancel button
@@ -330,7 +363,8 @@
       }
       document.getElementById('agent-log').style.display = 'none';
       document.getElementById('agent-form').style.display = 'flex';
-      agentMessages.innerHTML = '';
+      agentTerminal.textContent = '';
+      agentLogIndex = 0;
     });
   }
 
@@ -340,7 +374,8 @@
     retryBtn.addEventListener('click', function () {
       document.getElementById('agent-results').style.display = 'none';
       document.getElementById('agent-form').style.display = 'flex';
-      agentMessages.innerHTML = '';
+      agentTerminal.textContent = '';
+      agentLogIndex = 0;
     });
   }
 

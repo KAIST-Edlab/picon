@@ -438,6 +438,16 @@ async def agent_results(job_id: str):
     }
 
 
+@app.get("/api/agent/logs/{job_id}")
+async def agent_logs(job_id: str, since: int = 0):
+    """Return captured picon logs for an agent job, starting from index `since`."""
+    job = agent_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    logs = job.get("logs", [])
+    return {"lines": logs[since:], "total": len(logs)}
+
+
 @app.delete("/api/agent/cancel/{job_id}")
 async def agent_cancel(job_id: str):
     """Cancel a running agent evaluation."""
@@ -456,6 +466,24 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
     import picon
 
     job = agent_jobs[job_id]
+    job["logs"] = []  # list of log line strings
+
+    # Capture picon's logging output into job["logs"]
+    class _JobLogHandler(logging.Handler):
+        def emit(self, record):
+            try:
+                msg = self.format(record)
+                job["logs"].append(msg)
+            except Exception:
+                pass
+
+    log_handler = _JobLogHandler()
+    log_handler.setLevel(logging.INFO)
+    log_handler.setFormatter(logging.Formatter("%(message)s"))
+
+    # Attach to root logger so we catch all picon submodule logs
+    root_logger = logging.getLogger()
+    root_logger.addHandler(log_handler)
 
     try:
         result = await asyncio.to_thread(
@@ -505,6 +533,9 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
         job["status"] = "error"
         job["is_complete"] = True
         job["error"] = str(e)
+
+    finally:
+        root_logger.removeHandler(log_handler)
 
     # Persist final state
     _update_job_redis(job_id, {
