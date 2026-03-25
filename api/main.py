@@ -335,7 +335,7 @@ async def _run_experience_session(
         session["result"] = {
             "ic": scores.get("internal_harmonic_mean"),
             "ec": scores.get("external_ec"),
-            "rc": None,  # single session, no retest consistency
+            "rc": scores.get("intra_session_stability"),
         }
         session["status"] = "complete"
 
@@ -505,7 +505,7 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
             job["result"] = {
                 "ic": scores.get("internal_harmonic_mean"),
                 "ec": scores.get("external_ec"),
-                "rc": scores.get("inter_session_stability"),
+                "rc": scores.get("intra_session_stability"),
                 "internal_responsiveness": scores.get("internal_responsiveness"),
                 "internal_consistency": scores.get("internal_consistency"),
                 "external_coverage": scores.get("external_coverage"),
