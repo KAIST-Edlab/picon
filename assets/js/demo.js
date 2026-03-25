@@ -340,6 +340,7 @@
               name: results.name || 'Agent',
               type: 'community',
               arch: 'Community',
+              turns: parseInt(document.getElementById('agent-turns').value),
               ic: results.scores.ic || 0,
               ec: results.scores.ec || 0,
               rc: results.scores.rc || 0,
