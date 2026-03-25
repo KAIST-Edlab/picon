@@ -48,10 +48,14 @@
 
   // ===== Helpers =====
 
+  function linkify(text) {
+    return text.replace(/(https?:\/\/[^\s)<>]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+  }
+
   function addMessage(container, type, text) {
     var el = document.createElement('div');
     el.className = 'chat-msg ' + type;
-    el.textContent = text;
+    el.innerHTML = linkify(text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'));
     container.appendChild(el);
     container.scrollTop = container.scrollHeight;
     return el;
@@ -303,8 +307,7 @@
         var data = await res.json();
 
         agentProgress.textContent =
-          'Session ' + data.current_session + '/' + data.total_sessions +
-          ' — Turn ' + data.current_turn + '/' + data.total_turns;
+          'Session ' + data.current_session + '/' + data.total_sessions + ' — Running...';
 
         if (data.is_complete) {
           clearInterval(interval);

@@ -627,7 +627,7 @@ th { background: var(--color-bg-alt); font-weight: 600; }
   color: #7ec699;
 }
 
-.terminal-body {
+.agent-terminal .terminal-body {
   height: 420px;
   overflow-y: auto;
   padding: 1rem;
@@ -636,6 +636,7 @@ th { background: var(--color-bg-alt); font-weight: 600; }
   font-size: 0.78rem;
   line-height: 1.6;
   color: #d4d4d4;
+  background: #1e1e1e;
   white-space: pre-wrap;
   word-break: break-word;
 }
