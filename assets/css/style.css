@@ -129,13 +129,13 @@ a:hover { text-decoration: underline; }
 }
 
 .container {
-  max-width: 800px;
+  max-width: 1000px;
   margin: 0 auto;
   padding: 3rem 2rem;
 }
 
 .container-wide {
-  max-width: 960px;
+  max-width: 1200px;
   margin: 0 auto;
   padding: 3rem 2rem;
 }
