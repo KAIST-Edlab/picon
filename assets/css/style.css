@@ -916,6 +916,13 @@ th { background: var(--color-bg-alt); font-weight: 600; }
   position: relative;
 }
 
+.bibtex-block pre {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  margin: 0;
+}
+
 .copy-btn {
   position: absolute;
   top: 0.5rem;
