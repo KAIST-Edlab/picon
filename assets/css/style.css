@@ -169,7 +169,7 @@ p { margin-bottom: 1rem; }
 .hero .tagline {
   font-size: 1.125rem;
   color: var(--color-text-muted);
-  max-width: 600px;
+  max-width: 800px;
   margin: 0 auto 2.5rem;
   line-height: 1.7;
 }
@@ -216,8 +216,8 @@ p { margin-bottom: 1rem; }
 
 /* ===== Home Sections ===== */
 .home-section {
-  padding: 3rem 2rem;
-  max-width: 800px;
+  padding: 3rem 4rem;
+  max-width: none;
   margin: 0 auto;
 }
 
