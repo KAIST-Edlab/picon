@@ -129,15 +129,15 @@ a:hover { text-decoration: underline; }
 }
 
 .container {
-  max-width: none;
+  max-width: 75%;
   margin: 0 auto;
-  padding: 3rem 4rem;
+  padding: 3rem 2rem;
 }
 
 .container-wide {
-  max-width: none;
+  max-width: 85%;
   margin: 0 auto;
-  padding: 3rem 4rem;
+  padding: 3rem 2rem;
 }
 
 /* ===== Typography ===== */
@@ -216,8 +216,8 @@ p { margin-bottom: 1rem; }
 
 /* ===== Home Sections ===== */
 .home-section {
-  padding: 3rem 4rem;
-  max-width: none;
+  padding: 3rem 2rem;
+  max-width: 75%;
   margin: 0 auto;
 }
 
