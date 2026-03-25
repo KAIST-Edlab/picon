@@ -113,6 +113,7 @@
 
   document.getElementById('exp-start-btn').addEventListener('click', async function () {
     var name = document.getElementById('exp-name').value.trim();
+    var turns = parseInt(document.getElementById('exp-turns').value);
     if (!name) return;
 
     if (!API_BASE) {
@@ -128,7 +129,7 @@
       var res = await fetch(API_BASE + '/api/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name })
+        body: JSON.stringify({ name: name, num_turns: turns })
       });
 
       if (!res.ok) throw new Error('Failed to start: ' + res.status);
