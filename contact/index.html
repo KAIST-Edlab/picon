@@ -1,29 +1,12 @@
 ---
 layout: default
-title: Contact / Cite
-description: "Cite PICon, contact the authors, and find links to code and paper"
+title: Contact
+description: "Contact the authors and find links to code and paper"
 ---
 
 <div class="container">
-  <h1>Contact / Cite</h1>
-  <p class="subtitle">Reference this work, reach out, or explore the code</p>
-
-  <h2>Citation</h2>
-  <p>If you use PICon in your research, please cite:</p>
-
-  <div class="bibtex-block" id="bibtex">
-    <button class="copy-btn" onclick="copyBibtex()">Copy</button>
-<pre>@inproceedings{anonymous2025picon,
-  title     = {PICon: A Multi-Turn Interrogation Framework
-               for Evaluating Persona Agent Consistency},
-  author    = {Anonymous},
-  booktitle = {Proceedings of the 63rd Annual Meeting of
-               the Association for Computational
-               Linguistics (ACL)},
-  year      = {2025},
-  note      = {Under review}
-}</pre>
-  </div>
+  <h1>Contact</h1>
+  <p class="subtitle">Reach out or explore the code</p>
 
   <h2>Links</h2>
   <div class="contact-grid">
@@ -43,9 +26,9 @@ description: "Cite PICon, contact the authors, and find links to code and paper"
 
   <h2>Authors</h2>
   <p>
-    <em>Author information will be added after the anonymous review period.</em>
+    <em>Author information coming soon.</em>
   </p>
-  <!--
+  <!--TODO: uncomment when ready
   <div class="contact-grid">
     <div class="contact-card">
       <h4>Author Name</h4>
@@ -62,13 +45,3 @@ description: "Cite PICon, contact the authors, and find links to code and paper"
   </p>
 </div>
 
-<script>
-function copyBibtex() {
-  const text = document.querySelector('#bibtex pre').textContent;
-  navigator.clipboard.writeText(text).then(() => {
-    const btn = document.querySelector('.copy-btn');
-    btn.textContent = 'Copied!';
-    setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
-  });
-}
-</script>
