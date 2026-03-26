@@ -120,10 +120,11 @@ class ExperienceRespondRequest(BaseModel):
 
 class AgentStartRequest(BaseModel):
     name: str
+    mode: str = "quick"  # "external" or "quick"
     model: str = ""
     api_base: Optional[str] = None
     api_key: Optional[str] = None
-    persona: str
+    persona: Optional[str] = None
     num_turns: int = 50
     num_sessions: int = 2
 
@@ -360,8 +361,13 @@ async def agent_start(req: AgentStartRequest):
     """Start a background picon.run() evaluation against an external agent."""
     if not req.name:
         raise HTTPException(status_code=400, detail="Agent name is required")
-    if not req.persona:
-        raise HTTPException(status_code=400, detail="Persona / system prompt is required")
+    if req.mode == "external" and not req.api_base:
+        raise HTTPException(status_code=400, detail="API endpoint is required for external agent mode")
+    if req.mode == "quick":
+        if not req.model:
+            raise HTTPException(status_code=400, detail="Model name is required for quick agent mode")
+        if not req.persona:
+            raise HTTPException(status_code=400, detail="Persona / system prompt is required for quick agent mode")
 
     job_id = str(uuid.uuid4())
 
@@ -486,17 +492,33 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
     root_logger.addHandler(log_handler)
 
     try:
+        if req.mode == "external":
+            # Blackbox agent — only endpoint URL needed
+            run_kwargs = dict(
+                name=req.name,
+                api_base=req.api_base,
+                num_turns=req.num_turns,
+                num_sessions=req.num_sessions,
+                do_eval=True,
+                output_dir="/tmp/picon_results",
+            )
+        else:
+            # Quick agent — we build the agent from model + key + persona
+            run_kwargs = dict(
+                persona=req.persona,
+                name=req.name,
+                model=req.model or "openai/custom",
+                api_base=req.api_base or None,
+                api_key=req.api_key or None,
+                num_turns=req.num_turns,
+                num_sessions=req.num_sessions,
+                do_eval=True,
+                output_dir="/tmp/picon_results",
+            )
+
         result = await asyncio.to_thread(
             picon.run,
-            persona=req.persona,
-            name=req.name,
-            model=req.model or "openai/custom",
-            api_base=req.api_base or None,
-            api_key=req.api_key or None,
-            num_turns=req.num_turns,
-            num_sessions=req.num_sessions,
-            do_eval=True,
-            output_dir="/tmp/picon_results",
+            **run_kwargs,
             **PICON_AGENT_MODELS,
         )
 

@@ -223,60 +223,97 @@
   var agentProgress = document.getElementById('agent-progress');
   var agentSessionId = null;
   var agentLogIndex = 0;  // track how many log lines we've fetched
+  var activeSubmode = 'external';
 
-  document.getElementById('agent-start-btn').addEventListener('click', async function () {
-    var name = document.getElementById('agent-name').value.trim();
-    var model = document.getElementById('agent-model').value.trim();
-    var endpoint = document.getElementById('agent-endpoint').value.trim();
-    var apiKey = document.getElementById('agent-api-key').value.trim();
-    var persona = document.getElementById('agent-persona').value.trim();
-    var turns = document.getElementById('agent-turns').value;
-    var sessions = document.getElementById('agent-sessions').value;
+  // Submode switching
+  document.querySelectorAll('.agent-submode-card').forEach(function (card) {
+    card.addEventListener('click', function () {
+      document.querySelectorAll('.agent-submode-card').forEach(function (c) { c.classList.remove('active'); });
+      card.classList.add('active');
+      activeSubmode = card.dataset.submode;
+      document.getElementById('agent-form-external').style.display = activeSubmode === 'external' ? 'flex' : 'none';
+      document.getElementById('agent-form-quick').style.display = activeSubmode === 'quick' ? 'flex' : 'none';
+    });
+  });
 
-    if (!name) { alert('Please provide an agent name.'); return; }
-    if (!model) { alert('Please provide a model name (e.g. gpt-4o, gemini/gemini-2.5-flash).'); return; }
-    if (!apiKey) { alert('Please provide an API key for the model provider. You will be billed for the evaluation cost.'); return; }
-    if (!persona) { alert('Please provide a persona / system prompt.'); return; }
-
+  function startAgentEvaluation(payload, displayLabel) {
     if (!API_BASE) {
       alert('Demo backend is not configured. Please set demo_api_url in _config.yml.');
       return;
     }
 
-    document.getElementById('agent-form').style.display = 'none';
+    document.getElementById('agent-submode-selector').style.display = 'none';
+    document.getElementById('agent-form-external').style.display = 'none';
+    document.getElementById('agent-form-quick').style.display = 'none';
     document.getElementById('agent-log').style.display = 'block';
     agentTerminal.textContent = '';
     agentLogIndex = 0;
 
-    appendTerminal('$ picon.run(' + name + ', model=' + model + ', turns=' + turns + ')\n');
+    appendTerminal('$ picon.evaluate(' + displayLabel + ')\n');
     agentProgress.textContent = 'Starting evaluation...';
 
-    try {
-      var res = await fetch(API_BASE + '/api/agent/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: name,
-          model: model,
-          api_base: endpoint,
-          api_key: apiKey,
-          persona: persona,
-          num_turns: parseInt(turns),
-          num_sessions: parseInt(sessions),
-        })
-      });
+    (async function () {
+      try {
+        var res = await fetch(API_BASE + '/api/agent/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
 
-      if (!res.ok) throw new Error('Failed to start: ' + res.status);
-      var data = await res.json();
-      agentSessionId = data.session_id;
-      appendTerminal('Evaluation started. This may take several minutes...\n\n');
+        if (!res.ok) throw new Error('Failed to start: ' + res.status);
+        var data = await res.json();
+        agentSessionId = data.session_id;
+        appendTerminal('Evaluation started. This may take several minutes...\n\n');
+        pollAgentProgress(data.session_id);
+      } catch (err) {
+        appendTerminal('ERROR: ' + err.message + '\n');
+        agentProgress.textContent = 'Error';
+      }
+    })();
+  }
 
-      // Poll for progress and logs
-      pollAgentProgress(data.session_id);
-    } catch (err) {
-      appendTerminal('ERROR: ' + err.message + '\n');
-      agentProgress.textContent = 'Error';
-    }
+  // External Agent start
+  document.getElementById('agent-start-btn-external').addEventListener('click', function () {
+    var name = document.getElementById('ext-agent-name').value.trim();
+    var endpoint = document.getElementById('ext-agent-endpoint').value.trim();
+    var turns = document.getElementById('ext-agent-turns').value;
+    var sessions = document.getElementById('ext-agent-sessions').value;
+
+    if (!name) { alert('Please provide an agent name.'); return; }
+    if (!endpoint) { alert('Please provide your agent\'s API endpoint.'); return; }
+
+    startAgentEvaluation({
+      mode: 'external',
+      name: name,
+      api_base: endpoint,
+      num_turns: parseInt(turns),
+      num_sessions: parseInt(sessions),
+    }, name + ', endpoint=' + endpoint + ', turns=' + turns);
+  });
+
+  // Quick Agent start
+  document.getElementById('agent-start-btn-quick').addEventListener('click', function () {
+    var name = document.getElementById('quick-agent-name').value.trim();
+    var model = document.getElementById('quick-agent-model').value.trim();
+    var apiKey = document.getElementById('quick-agent-api-key').value.trim();
+    var persona = document.getElementById('quick-agent-persona').value.trim();
+    var turns = document.getElementById('quick-agent-turns').value;
+    var sessions = document.getElementById('quick-agent-sessions').value;
+
+    if (!name) { alert('Please provide an agent name.'); return; }
+    if (!model) { alert('Please provide a model name (e.g. gpt-4o, gemini/gemini-2.5-flash).'); return; }
+    if (!apiKey) { alert('Please provide an API key. This covers your agent\'s LLM inference cost only — PICon evaluation cost is on us.'); return; }
+    if (!persona) { alert('Please provide a persona / system prompt.'); return; }
+
+    startAgentEvaluation({
+      mode: 'quick',
+      name: name,
+      model: model,
+      api_key: apiKey,
+      persona: persona,
+      num_turns: parseInt(turns),
+      num_sessions: parseInt(sessions),
+    }, name + ', model=' + model + ', turns=' + turns);
   });
 
   function appendTerminal(text) {
@@ -340,7 +377,7 @@
               name: results.name || 'Agent',
               type: 'community',
               arch: 'Community',
-              turns: parseInt(document.getElementById('agent-turns').value),
+              turns: parseInt(document.getElementById(activeSubmode === 'external' ? 'ext-agent-turns' : 'quick-agent-turns').value),
               ic: results.scores.ic || 0,
               ec: results.scores.ec || 0,
               rc: results.scores.rc || 0,
@@ -358,6 +395,12 @@
     }, 3000);
   }
 
+  function showAgentForm() {
+    document.getElementById('agent-submode-selector').style.display = '';
+    document.getElementById('agent-form-external').style.display = activeSubmode === 'external' ? 'flex' : 'none';
+    document.getElementById('agent-form-quick').style.display = activeSubmode === 'quick' ? 'flex' : 'none';
+  }
+
   // Cancel button
   var cancelBtn = document.getElementById('agent-cancel-btn');
   if (cancelBtn) {
@@ -367,7 +410,7 @@
         catch (e) { /* ignore */ }
       }
       document.getElementById('agent-log').style.display = 'none';
-      document.getElementById('agent-form').style.display = 'flex';
+      showAgentForm();
       agentTerminal.textContent = '';
       agentLogIndex = 0;
     });
@@ -378,7 +421,7 @@
   if (retryBtn) {
     retryBtn.addEventListener('click', function () {
       document.getElementById('agent-results').style.display = 'none';
-      document.getElementById('agent-form').style.display = 'flex';
+      showAgentForm();
       agentTerminal.textContent = '';
       agentLogIndex = 0;
     });

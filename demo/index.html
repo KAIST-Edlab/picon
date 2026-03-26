@@ -73,53 +73,94 @@ layout_js: /assets/js/demo.js
   <div class="demo-panel" id="panel-agent-test">
     <div class="demo-description">
       <strong>Test your own persona agent.</strong>
-      Provide your agent's API endpoint (OpenAI chat-completions compatible) along with a persona
-      description. PICon will run the full interrogation pipeline and return a detailed consistency
-      report. Results are automatically added to the leaderboard.
+      PICon will run the full interrogation pipeline and return a detailed consistency report.
+      Results are automatically added to the leaderboard.
     </div>
 
-    <div class="agent-form" id="agent-form">
+    <!-- Submode selector -->
+    <div class="agent-submode-selector" id="agent-submode-selector">
+      <button class="agent-submode-card active" data-submode="external">
+        <span class="submode-icon">🔗</span>
+        <span class="submode-title">Connect External Agent</span>
+        <span class="submode-desc">Already have an agent hosted elsewhere? Just provide its endpoint URL — no API key or model config needed.</span>
+      </button>
+      <button class="agent-submode-card" data-submode="quick">
+        <span class="submode-icon">⚡</span>
+        <span class="submode-title">Quick Agent Setup</span>
+        <span class="submode-desc">Pick an LLM, write a persona prompt, and PICon will build and evaluate the agent for you.</span>
+      </button>
+    </div>
+
+    <!-- External Agent form -->
+    <div class="agent-form" id="agent-form-external">
+      <div class="form-group">
+        <label for="ext-agent-name">Agent Name <span class="label-hint">(required)</span></label>
+        <input type="text" id="ext-agent-name" placeholder="e.g. MyPersonaBot v2">
+      </div>
+      <div class="form-group">
+        <label for="ext-agent-endpoint">Agent API Endpoint <span class="label-hint">(required — OpenAI chat-completions compatible)</span></label>
+        <input type="url" id="ext-agent-endpoint" placeholder="e.g. https://your-server.com/v1">
+      </div>
       <div class="form-row">
         <div class="form-group" style="flex:1;">
-          <label for="agent-name">Agent Name <span class="label-hint">(required)</span></label>
-          <input type="text" id="agent-name" placeholder="e.g. MyPersonaBot v2">
-        </div>
-        <div class="form-group" style="flex:1;">
-          <label for="agent-model">Model <span class="label-hint">(required)</span></label>
-          <input type="text" id="agent-model" placeholder="e.g. gpt-4o, gemini/gemini-2.5-flash">
-        </div>
-      </div>
-      <div class="form-group">
-        <label for="agent-endpoint">Agent API Endpoint <span class="label-hint">(optional — only needed for self-hosted models)</span></label>
-        <input type="url" id="agent-endpoint" placeholder="Leave blank for cloud APIs (OpenAI, Gemini). For self-hosted: http://your-server/v1">
-      </div>
-      <div class="form-group">
-        <label for="agent-api-key">API Key <span class="label-hint">(required — you pay for the evaluation cost)</span></label>
-        <input type="password" id="agent-api-key" placeholder="Your API key (e.g. OpenAI, Gemini)">
-      </div>
-      <div class="form-group">
-        <label for="agent-persona">Persona / System Prompt <span class="label-hint">(required)</span></label>
-        <textarea id="agent-persona" rows="5" placeholder="Paste the system prompt that defines your agent's persona. This is sent as the system message and also used by PICon for evaluation."></textarea>
-      </div>
-      <div class="form-row">
-        <div class="form-group" style="flex:1;">
-          <label for="agent-turns">Interrogation Turns</label>
-          <select id="agent-turns">
+          <label for="ext-agent-turns">Interrogation Turns</label>
+          <select id="ext-agent-turns">
             <option value="30">30 turns (quick)</option>
             <option value="50" selected>50 turns (standard)</option>
             <option value="75">75 turns (thorough)</option>
           </select>
         </div>
         <div class="form-group" style="flex:1;">
-          <label for="agent-sessions">Sessions</label>
-          <select id="agent-sessions">
+          <label for="ext-agent-sessions">Sessions</label>
+          <select id="ext-agent-sessions">
             <option value="1" selected>1 session (IC + EC only)</option>
             <option value="2">2 sessions (+ Retest Consistency)</option>
             <option value="3">3 sessions (+ Retest Consistency)</option>
           </select>
         </div>
       </div>
-      <button class="btn btn-accent" id="agent-start-btn">Run PICon Evaluation</button>
+      <button class="btn btn-accent" id="agent-start-btn-external">Run PICon Evaluation</button>
+    </div>
+
+    <!-- Quick Agent form -->
+    <div class="agent-form" id="agent-form-quick" style="display:none;">
+      <div class="form-row">
+        <div class="form-group" style="flex:1;">
+          <label for="quick-agent-name">Agent Name <span class="label-hint">(required)</span></label>
+          <input type="text" id="quick-agent-name" placeholder="e.g. MyPersonaBot v2">
+        </div>
+        <div class="form-group" style="flex:1;">
+          <label for="quick-agent-model">Model <span class="label-hint">(required)</span></label>
+          <input type="text" id="quick-agent-model" placeholder="e.g. gpt-4o, gemini/gemini-2.5-flash">
+        </div>
+      </div>
+      <div class="form-group">
+        <label for="quick-agent-api-key">API Key <span class="label-hint">(required — covers your agent's LLM inference cost only)</span></label>
+        <input type="password" id="quick-agent-api-key" placeholder="Your API key (e.g. OpenAI, Gemini)">
+      </div>
+      <div class="form-group">
+        <label for="quick-agent-persona">Persona / System Prompt <span class="label-hint">(required)</span></label>
+        <textarea id="quick-agent-persona" rows="5" placeholder="Paste the system prompt that defines your agent's persona. This is sent as the system message and also used by PICon for evaluation."></textarea>
+      </div>
+      <div class="form-row">
+        <div class="form-group" style="flex:1;">
+          <label for="quick-agent-turns">Interrogation Turns</label>
+          <select id="quick-agent-turns">
+            <option value="30">30 turns (quick)</option>
+            <option value="50" selected>50 turns (standard)</option>
+            <option value="75">75 turns (thorough)</option>
+          </select>
+        </div>
+        <div class="form-group" style="flex:1;">
+          <label for="quick-agent-sessions">Sessions</label>
+          <select id="quick-agent-sessions">
+            <option value="1" selected>1 session (IC + EC only)</option>
+            <option value="2">2 sessions (+ Retest Consistency)</option>
+            <option value="3">3 sessions (+ Retest Consistency)</option>
+          </select>
+        </div>
+      </div>
+      <button class="btn btn-accent" id="agent-start-btn-quick">Run PICon Evaluation</button>
     </div>
 
     <!-- Agent test live log -->
@@ -249,12 +290,10 @@ result.save("results/john.json")</code></pre>
     </div>
 
     <div class="code-block">
-      <div class="code-header">Self-Hosted Model</div>
-      <pre><code>result = picon.run(
-    persona="",                                # server manages persona
-    name="Llama3",
-    model="meta-llama/Llama-3-8B",
-    api_base="http://localhost:8000/v1",       # OpenAI-compatible endpoint
+      <div class="code-header">External Agent (Blackbox API)</div>
+      <pre><code># Only the endpoint URL is needed — persona is baked into the agent
+result = picon.run(
+    api_base="http://your-server.com/v1",      # OpenAI-compatible endpoint
     num_turns=30,
 )</code></pre>
     </div>
