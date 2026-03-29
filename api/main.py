@@ -40,6 +40,122 @@ redis_client: Optional[redis.Redis] = None
 
 JOB_TTL = 86400  # 24 hours
 
+# ---------------------------------------------------------------------------
+# Usage / Budget tracking
+# ---------------------------------------------------------------------------
+# Hard cap per individual job (prevents a single runaway evaluation). 0 = off.
+MAX_COST_PER_JOB = float(os.getenv("MAX_COST_PER_JOB", "3.0"))
+# Daily per-IP budget — once an IP crosses this, new jobs are rejected. 0 = off.
+MAX_COST_PER_IP_DAILY = float(os.getenv("MAX_COST_PER_IP_DAILY", "10.0"))
+USAGE_TTL = 86400 * 7  # keep cost keys for 7 days
+
+# In-memory cost map: job_id -> cumulative USD spent
+job_costs: Dict[str, float] = {}
+
+# Thread-local: associates the running thread with a job_id so the LiteLLM
+# callback can attribute costs without passing job_id through picon internals.
+_job_context = threading.local()
+
+
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP — respects X-Forwarded-For (Railway / reverse proxy)."""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _ip_day_key(ip: str) -> str:
+    return f"usage:ip:{ip}:{time.strftime('%Y-%m-%d')}"
+
+
+def _get_ip_daily_cost(ip: str) -> float:
+    try:
+        r = get_redis()
+        val = r.get(_ip_day_key(ip))
+        return float(val) if val else 0.0
+    except Exception:
+        return 0.0
+
+
+def _check_ip_budget(ip: str):
+    """Raise HTTP 429 if the IP has already exceeded its daily budget."""
+    if MAX_COST_PER_IP_DAILY <= 0:
+        return
+    spent = _get_ip_daily_cost(ip)
+    if spent >= MAX_COST_PER_IP_DAILY:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Daily usage limit reached (${spent:.4f} of ${MAX_COST_PER_IP_DAILY:.2f}). Try again tomorrow.",
+        )
+
+
+def _add_job_cost(job_id: str, cost: float) -> float:
+    """Accumulate *cost* for a job; also update per-IP and global daily counters."""
+    job_costs[job_id] = job_costs.get(job_id, 0.0) + cost
+    job_total = job_costs[job_id]
+
+    try:
+        r = get_redis()
+        # Per-job running total
+        r.setex(f"cost:{job_id}", USAGE_TTL, job_total)
+        # Per-IP daily total
+        job = agent_jobs.get(job_id) or sessions.get(job_id, {})
+        ip = job.get("client_ip", "unknown")
+        ip_key = _ip_day_key(ip)
+        ip_total = r.incrbyfloat(ip_key, cost)
+        r.expire(ip_key, USAGE_TTL)
+        # Global daily total
+        day_key = f"usage:daily:{time.strftime('%Y-%m-%d')}"
+        r.incrbyfloat(day_key, cost)
+        r.expire(day_key, USAGE_TTL)
+    except Exception:
+        ip_total = 0.0
+
+    return job_total
+
+
+def _litellm_cost_callback(kwargs, completion_response, start_time, end_time):
+    """LiteLLM success callback — attributes call cost to the current job + IP."""
+    job_id = getattr(_job_context, "job_id", None)
+    if not job_id:
+        return
+    try:
+        import litellm
+        cost = litellm.completion_cost(completion_response=completion_response)
+    except Exception:
+        cost = 0.0
+
+    job_total = _add_job_cost(job_id, cost)
+    logger.debug("Job %s: +$%.5f (job total $%.5f)", job_id, cost, job_total)
+
+    # Per-job hard cap
+    if MAX_COST_PER_JOB > 0 and job_total > MAX_COST_PER_JOB:
+        _cancel_job_over_budget(job_id, "job", job_total, MAX_COST_PER_JOB)
+        return
+
+    # Per-IP daily cap — check live Redis value
+    job = agent_jobs.get(job_id) or sessions.get(job_id, {})
+    ip = job.get("client_ip", "unknown")
+    ip_total = _get_ip_daily_cost(ip)
+    if MAX_COST_PER_IP_DAILY > 0 and ip_total > MAX_COST_PER_IP_DAILY:
+        _cancel_job_over_budget(job_id, f"IP {ip} daily", ip_total, MAX_COST_PER_IP_DAILY)
+
+
+def _cancel_job_over_budget(job_id: str, scope: str, total: float, limit: float):
+    """Mark the job as cancelled and attempt to cancel its asyncio task."""
+    job = agent_jobs.get(job_id)
+    if not job or job.get("is_complete"):
+        return
+    msg = f"Budget exceeded ({scope}): ${total:.4f} > limit ${limit:.2f}"
+    job["status"] = "cancelled"
+    job["is_complete"] = True
+    job["error"] = msg
+    task = job.get("task")
+    if task and not task.done():
+        task.cancel()
+    logger.warning("Job %s cancelled — %s", job_id, msg)
+
 # Agent model configuration for picon pipeline
 PICON_AGENT_MODELS = {
     "questioner_model": os.getenv("PICON_QUESTIONER_MODEL", "gpt-5"),
@@ -62,6 +178,15 @@ def get_redis() -> redis.Redis:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Register LiteLLM cost callback
+    try:
+        import litellm
+        if _litellm_cost_callback not in litellm.success_callbacks:
+            litellm.success_callbacks.append(_litellm_cost_callback)
+        logger.info("LiteLLM cost callback registered (limit: $%.2f/job)", MAX_COST_PER_JOB)
+    except ImportError:
+        logger.warning("litellm not available — cost tracking disabled")
+
     try:
         r = get_redis()
         r.ping()
@@ -194,8 +319,11 @@ async def bridge_chat_completions(session_id: str, request: Request):
 # ===========================================================================
 
 @app.post("/api/start")
-async def experience_start(req: ExperienceStartRequest):
+async def experience_start(req: ExperienceStartRequest, request: Request):
     """Start Experience Mode: launches picon.run() with bridge as the agent endpoint."""
+    ip = _client_ip(request)
+    _check_ip_budget(ip)
+
     session_id = str(uuid.uuid4())
 
     # Determine the server's own URL for the bridge
@@ -212,6 +340,7 @@ async def experience_start(req: ExperienceStartRequest):
         "error": None,
         "name": req.name,
         "turn_count": -1,
+        "client_ip": ip,
     }
     sessions[session_id] = session
 
@@ -318,9 +447,16 @@ async def _run_experience_session(
 
     session = sessions[session_id]
 
+    def _run_with_context(*args, **kwargs):
+        _job_context.job_id = session_id
+        try:
+            return picon.run(*args, **kwargs)
+        finally:
+            _job_context.job_id = None
+
     try:
         result = await asyncio.to_thread(
-            picon.run,
+            _run_with_context,
             persona="",  # no system prompt — the human IS the persona
             name=name,
             model="human",
@@ -357,7 +493,7 @@ async def _run_experience_session(
 # ===========================================================================
 
 @app.post("/api/agent/start")
-async def agent_start(req: AgentStartRequest):
+async def agent_start(req: AgentStartRequest, request: Request):
     """Start a background picon.run() evaluation against an external agent."""
     if not req.name:
         raise HTTPException(status_code=400, detail="Agent name is required")
@@ -368,6 +504,9 @@ async def agent_start(req: AgentStartRequest):
             raise HTTPException(status_code=400, detail="Model name is required for quick agent mode")
         if not req.persona:
             raise HTTPException(status_code=400, detail="Persona / system prompt is required for quick agent mode")
+
+    ip = _client_ip(request)
+    _check_ip_budget(ip)
 
     job_id = str(uuid.uuid4())
 
@@ -382,6 +521,7 @@ async def agent_start(req: AgentStartRequest):
         "is_complete": False,
         "result": None,
         "error": None,
+        "client_ip": ip,
     }
     agent_jobs[job_id] = job
 
@@ -417,6 +557,7 @@ async def agent_status(job_id: str):
         "total_turns": job["total_turns"],
         "is_complete": job["is_complete"],
         "error": job["error"],
+        "cost_usd": round(job_costs.get(job_id, 0.0), 5),
     }
 
 
@@ -491,6 +632,14 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
     root_logger = logging.getLogger()
     root_logger.addHandler(log_handler)
 
+    def _run_with_context(*args, **kwargs):
+        """Wrapper that sets thread-local job_id before calling picon.run()."""
+        _job_context.job_id = job_id
+        try:
+            return picon.run(*args, **kwargs)
+        finally:
+            _job_context.job_id = None
+
     try:
         if req.mode == "external":
             # Blackbox agent — only endpoint URL needed
@@ -517,7 +666,7 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
             )
 
         result = await asyncio.to_thread(
-            picon.run,
+            _run_with_context,
             **run_kwargs,
             **PICON_AGENT_MODELS,
         )
@@ -566,6 +715,7 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
         "is_complete": True,
         "scores": job.get("result"),
         "error": job.get("error"),
+        "cost_usd": round(job_costs.get(job_id, 0.0), 5),
     })
 
 
@@ -636,6 +786,53 @@ def _get_job_redis(job_id: str) -> Optional[dict]:
         return json.loads(raw) if raw else None
     except Exception:
         return None
+
+
+# ===========================================================================
+# Usage summary
+# ===========================================================================
+
+@app.get("/api/usage")
+async def get_usage():
+    """Return daily cost totals broken down by day and by IP."""
+    daily_global: Dict[str, float] = {}
+    daily_by_ip: Dict[str, Dict[str, float]] = {}
+
+    try:
+        r = get_redis()
+        for key in r.keys("usage:daily:*"):
+            val = r.get(key)
+            if val:
+                daily_global[key.replace("usage:daily:", "")] = round(float(val), 5)
+        for key in r.keys("usage:ip:*"):
+            val = r.get(key)
+            if val:
+                # key format: usage:ip:{ip}:{date}
+                parts = key.split(":", 3)  # ["usage", "ip", ip, date]
+                if len(parts) == 4:
+                    ip, date = parts[2], parts[3]
+                    daily_by_ip.setdefault(ip, {})[date] = round(float(val), 5)
+    except Exception:
+        pass
+
+    active = {
+        jid: {
+            "cost_usd": round(job_costs.get(jid, 0.0), 5),
+            "client_ip": agent_jobs[jid].get("client_ip", "unknown"),
+        }
+        for jid in agent_jobs
+        if not agent_jobs[jid].get("is_complete")
+    }
+
+    return {
+        "limits": {
+            "max_cost_per_job_usd": MAX_COST_PER_JOB,
+            "max_cost_per_ip_daily_usd": MAX_COST_PER_IP_DAILY,
+        },
+        "daily_totals_usd": daily_global,
+        "daily_by_ip_usd": daily_by_ip,
+        "active_jobs": active,
+    }
 
 
 # ===========================================================================
