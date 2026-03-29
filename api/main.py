@@ -181,10 +181,11 @@ async def lifespan(app: FastAPI):
     # Register LiteLLM cost callback
     try:
         import litellm
-        if _litellm_cost_callback not in litellm.success_callbacks:
-            litellm.success_callbacks.append(_litellm_cost_callback)
+        existing = getattr(litellm, "success_callbacks", []) or []
+        if _litellm_cost_callback not in existing:
+            litellm.success_callbacks = existing + [_litellm_cost_callback]
         logger.info("LiteLLM cost callback registered (limit: $%.2f/job)", MAX_COST_PER_JOB)
-    except ImportError:
+    except Exception:
         logger.warning("litellm not available — cost tracking disabled")
 
     try:
