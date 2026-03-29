@@ -13,6 +13,7 @@ Agent Test Mode simply calls picon.run() with the user's external API endpoint.
 import asyncio
 import json
 import logging
+import multiprocessing
 import os
 import queue
 import threading
@@ -52,9 +53,32 @@ USAGE_TTL = 86400 * 7  # keep cost keys for 7 days
 # In-memory cost map: job_id -> cumulative USD spent
 job_costs: Dict[str, float] = {}
 
-# Thread-local: associates the running thread with a job_id so the LiteLLM
-# callback can attribute costs without passing job_id through picon internals.
-_job_context = threading.local()
+
+def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict):
+    """
+    Runs inside a subprocess. Patches picon.utils.completion so every LiteLLM
+    call sends its cost back to the parent via result_queue, then calls picon.run().
+    """
+    import picon
+    import picon.utils
+    from litellm import completion as _original_completion, completion_cost
+
+    def _patched_completion(*args, **kwargs):
+        response = _original_completion(*args, **kwargs)
+        try:
+            cost = completion_cost(completion_response=response)
+        except Exception:
+            cost = 0.0
+        result_queue.put(("cost", cost))
+        return response
+
+    picon.utils.completion = _patched_completion
+
+    try:
+        result = picon.run(**run_kwargs)
+        result_queue.put(("result", result))
+    except Exception as e:
+        result_queue.put(("error", str(e)))
 
 
 def _client_ip(request: Request) -> str:
@@ -115,35 +139,8 @@ def _add_job_cost(job_id: str, cost: float) -> float:
     return job_total
 
 
-def _litellm_cost_callback(kwargs, completion_response, start_time, end_time):
-    """LiteLLM success callback — attributes call cost to the current job + IP."""
-    job_id = getattr(_job_context, "job_id", None)
-    if not job_id:
-        return
-    try:
-        import litellm
-        cost = litellm.completion_cost(completion_response=completion_response)
-    except Exception:
-        cost = 0.0
-
-    job_total = _add_job_cost(job_id, cost)
-    logger.debug("Job %s: +$%.5f (job total $%.5f)", job_id, cost, job_total)
-
-    # Per-job hard cap
-    if MAX_COST_PER_JOB > 0 and job_total > MAX_COST_PER_JOB:
-        _cancel_job_over_budget(job_id, "job", job_total, MAX_COST_PER_JOB)
-        return
-
-    # Per-IP daily cap — check live Redis value
-    job = agent_jobs.get(job_id) or sessions.get(job_id, {})
-    ip = job.get("client_ip", "unknown")
-    ip_total = _get_ip_daily_cost(ip)
-    if MAX_COST_PER_IP_DAILY > 0 and ip_total > MAX_COST_PER_IP_DAILY:
-        _cancel_job_over_budget(job_id, f"IP {ip} daily", ip_total, MAX_COST_PER_IP_DAILY)
-
-
 def _cancel_job_over_budget(job_id: str, scope: str, total: float, limit: float):
-    """Mark the job as cancelled and attempt to cancel its asyncio task."""
+    """Kill the subprocess and mark the job cancelled."""
     job = agent_jobs.get(job_id)
     if not job or job.get("is_complete"):
         return
@@ -151,9 +148,9 @@ def _cancel_job_over_budget(job_id: str, scope: str, total: float, limit: float)
     job["status"] = "cancelled"
     job["is_complete"] = True
     job["error"] = msg
-    task = job.get("task")
-    if task and not task.done():
-        task.cancel()
+    proc = job.get("process")
+    if proc and proc.is_alive():
+        proc.terminate()
     logger.warning("Job %s cancelled — %s", job_id, msg)
 
 # Agent model configuration for picon pipeline
@@ -178,16 +175,6 @@ def get_redis() -> redis.Redis:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Register LiteLLM cost callback
-    try:
-        import litellm
-        existing = getattr(litellm, "success_callbacks", []) or []
-        if _litellm_cost_callback not in existing:
-            litellm.success_callbacks = existing + [_litellm_cost_callback]
-        logger.info("LiteLLM cost callback registered (limit: $%.2f/job)", MAX_COST_PER_JOB)
-    except Exception:
-        logger.warning("litellm not available — cost tracking disabled")
-
     try:
         r = get_redis()
         r.ping()
@@ -601,115 +588,120 @@ async def agent_cancel(job_id: str):
     """Cancel a running agent evaluation."""
     job = agent_jobs.get(job_id)
     if job:
-        task = job.get("task")
-        if task and not task.done():
-            task.cancel()
+        proc = job.get("process")
+        if proc and proc.is_alive():
+            proc.terminate()
         job["status"] = "cancelled"
         job["is_complete"] = True
     return {"status": "cancelled"}
 
 
 async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
-    """Background task: run picon.run() against an external agent endpoint."""
-    import picon
-
+    """Background task: runs picon in a subprocess and drains its result queue."""
     job = agent_jobs[job_id]
-    job["logs"] = []  # list of log line strings
+    job["logs"] = []
 
-    # Capture picon's logging output into job["logs"]
-    class _JobLogHandler(logging.Handler):
-        def emit(self, record):
-            try:
-                msg = self.format(record)
-                job["logs"].append(msg)
-            except Exception:
-                pass
-
-    log_handler = _JobLogHandler()
-    log_handler.setLevel(logging.INFO)
-    log_handler.setFormatter(logging.Formatter("%(message)s"))
-
-    # Attach to root logger so we catch all picon submodule logs
-    root_logger = logging.getLogger()
-    root_logger.addHandler(log_handler)
-
-    def _run_with_context(*args, **kwargs):
-        """Wrapper that sets thread-local job_id before calling picon.run()."""
-        _job_context.job_id = job_id
-        try:
-            return picon.run(*args, **kwargs)
-        finally:
-            _job_context.job_id = None
-
-    try:
-        if req.mode == "external":
-            # Blackbox agent — only endpoint URL needed
-            run_kwargs = dict(
-                name=req.name,
-                api_base=req.api_base,
-                num_turns=req.num_turns,
-                num_sessions=req.num_sessions,
-                do_eval=True,
-                output_dir="/tmp/picon_results",
-            )
-        else:
-            # Quick agent — we build the agent from model + key + persona
-            run_kwargs = dict(
-                persona=req.persona,
-                name=req.name,
-                model=req.model or "openai/custom",
-                api_base=req.api_base or None,
-                api_key=req.api_key or None,
-                num_turns=req.num_turns,
-                num_sessions=req.num_sessions,
-                do_eval=True,
-                output_dir="/tmp/picon_results",
-            )
-
-        result = await asyncio.to_thread(
-            _run_with_context,
-            **run_kwargs,
+    if req.mode == "external":
+        run_kwargs = dict(
+            name=req.name,
+            api_base=req.api_base,
+            num_turns=req.num_turns,
+            num_sessions=req.num_sessions,
+            do_eval=True,
+            output_dir="/tmp/picon_results",
+            **PICON_AGENT_MODELS,
+        )
+    else:
+        run_kwargs = dict(
+            persona=req.persona,
+            name=req.name,
+            model=req.model or "openai/custom",
+            api_base=req.api_base or None,
+            api_key=req.api_key or None,
+            num_turns=req.num_turns,
+            num_sessions=req.num_sessions,
+            do_eval=True,
+            output_dir="/tmp/picon_results",
             **PICON_AGENT_MODELS,
         )
 
-        if result.success:
-            scores = result.eval_scores or {}
-            job["result"] = {
-                "ic": scores.get("internal_harmonic_mean"),
-                "ec": scores.get("external_ec"),
-                "rc": scores.get("intra_session_stability"),
-                "internal_responsiveness": scores.get("internal_responsiveness"),
-                "internal_consistency": scores.get("internal_consistency"),
-                "external_coverage": scores.get("external_coverage"),
-                "external_non_refutation": scores.get("external_non_refutation_rate"),
-                "intra_session_stability": scores.get("intra_session_stability"),
-            }
-            job["status"] = "complete"
-            job["is_complete"] = True
+    result_queue = multiprocessing.Queue()
+    proc = multiprocessing.Process(
+        target=_picon_worker,
+        args=(result_queue, run_kwargs),
+        daemon=True,
+    )
+    job["process"] = proc
+    proc.start()
 
-            # Save to leaderboard in Redis
-            _add_to_leaderboard(req.name, req.model, job["result"], req.num_turns)
+    ip = job.get("client_ip", "unknown")
 
-            logger.info("Agent eval complete for %s: %s", req.name, job["result"])
-        else:
-            job["status"] = "failed"
-            job["is_complete"] = True
-            job["error"] = "Evaluation failed" + (" (AI detected)" if result.ai_detected else "")
+    try:
+        while proc.is_alive() or not result_queue.empty():
+            try:
+                msg_type, payload = await asyncio.to_thread(result_queue.get, timeout=1)
+            except queue.Empty:
+                continue
+
+            if msg_type == "cost":
+                job_total = _add_job_cost(job_id, payload)
+                logger.debug("Job %s: +$%.5f (total $%.5f)", job_id, payload, job_total)
+                # Per-job cap
+                if MAX_COST_PER_JOB > 0 and job_total > MAX_COST_PER_JOB:
+                    _cancel_job_over_budget(job_id, "job", job_total, MAX_COST_PER_JOB)
+                    return
+                # Per-IP daily cap
+                ip_total = _get_ip_daily_cost(ip)
+                if MAX_COST_PER_IP_DAILY > 0 and ip_total > MAX_COST_PER_IP_DAILY:
+                    _cancel_job_over_budget(job_id, f"IP {ip} daily", ip_total, MAX_COST_PER_IP_DAILY)
+                    return
+
+            elif msg_type == "result":
+                result = payload
+                if result.success:
+                    scores = result.eval_scores or {}
+                    job["result"] = {
+                        "ic": scores.get("internal_harmonic_mean"),
+                        "ec": scores.get("external_ec"),
+                        "rc": scores.get("intra_session_stability"),
+                        "internal_responsiveness": scores.get("internal_responsiveness"),
+                        "internal_consistency": scores.get("internal_consistency"),
+                        "external_coverage": scores.get("external_coverage"),
+                        "external_non_refutation": scores.get("external_non_refutation_rate"),
+                        "intra_session_stability": scores.get("intra_session_stability"),
+                    }
+                    job["status"] = "complete"
+                    job["is_complete"] = True
+                    _add_to_leaderboard(req.name, req.model, job["result"], req.num_turns)
+                    logger.info("Agent eval complete for %s", req.name)
+                else:
+                    job["status"] = "failed"
+                    job["is_complete"] = True
+                    job["error"] = "Evaluation failed" + (" (AI detected)" if result.ai_detected else "")
+
+            elif msg_type == "error":
+                logger.error("Agent eval error for %s: %s", req.name, payload)
+                job["status"] = "error"
+                job["is_complete"] = True
+                job["error"] = payload
 
     except asyncio.CancelledError:
+        if proc.is_alive():
+            proc.terminate()
         job["status"] = "cancelled"
         job["is_complete"] = True
 
     except Exception as e:
         logger.exception("Agent eval error for %s", req.name)
+        if proc.is_alive():
+            proc.terminate()
         job["status"] = "error"
         job["is_complete"] = True
         job["error"] = str(e)
 
     finally:
-        root_logger.removeHandler(log_handler)
+        proc.join(timeout=5)
 
-    # Persist final state
     _update_job_redis(job_id, {
         "status": job["status"],
         "name": job["name"],
