@@ -30,11 +30,27 @@
 
   BASELINES.forEach(function (d) { d.area = computeArea(d); });
 
-  // Community submissions (loaded from API or localStorage)
+  // Community submissions (loaded from API; localStorage as fallback)
   var communityEntries = [];
   try {
     communityEntries = JSON.parse(localStorage.getItem('picon_community') || '[]');
   } catch (e) { /* ignore */ }
+
+  function fetchCommunityEntries() {
+    if (!API_BASE) return;
+    fetch(API_BASE + '/api/leaderboard')
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        if (data.entries && data.entries.length > 0) {
+          communityEntries = data.entries.map(function (e) {
+            e.area = computeArea(e);
+            return e;
+          });
+          renderLeaderboard();
+        }
+      })
+      .catch(function () { /* keep localStorage entries */ });
+  }
 
   // ===== Tab switching =====
   document.querySelectorAll('.demo-tab').forEach(function (tab) {
@@ -43,6 +59,7 @@
       document.querySelectorAll('.demo-panel').forEach(function (p) { p.classList.remove('active'); });
       tab.classList.add('active');
       document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
+      if (tab.dataset.tab === 'leaderboard') fetchCommunityEntries();
     });
   });
 
