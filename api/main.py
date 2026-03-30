@@ -60,19 +60,6 @@ def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict):
     call sends its cost back to the parent via result_queue, then calls picon.run().
     """
     import picon
-    import picon.utils
-    from litellm import completion as _original_completion, completion_cost
-
-    def _patched_completion(*args, **kwargs):
-        response = _original_completion(*args, **kwargs)
-        try:
-            cost = completion_cost(completion_response=response)
-        except Exception:
-            cost = 0.0
-        result_queue.put(("cost", cost))
-        return response
-
-    picon.utils.completion = _patched_completion
 
     try:
         result = picon.run(**run_kwargs)
@@ -458,9 +445,9 @@ async def _run_experience_session(
 
         scores = result.eval_scores or {}
         session["result"] = {
-            "ic": scores.get("internal_harmonic_mean"),
-            "ec": scores.get("external_ec"),
-            "rc": scores.get("intra_session_stability"),
+            "ic": scores.get("eval_internal_harmonic_mean"),
+            "ec": scores.get("eval_external_wilson"),
+            "rc": scores.get("eval_stability_intra_session"),
         }
         session["status"] = "complete"
 
@@ -661,14 +648,13 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
                 if result.success:
                     scores = result.eval_scores or {}
                     job["result"] = {
-                        "ic": scores.get("internal_harmonic_mean"),
-                        "ec": scores.get("external_ec"),
-                        "rc": scores.get("intra_session_stability"),
-                        "internal_responsiveness": scores.get("internal_responsiveness"),
-                        "internal_consistency": scores.get("internal_consistency"),
-                        "external_coverage": scores.get("external_coverage"),
-                        "external_non_refutation": scores.get("external_non_refutation_rate"),
-                        "intra_session_stability": scores.get("intra_session_stability"),
+                        "ic": scores.get("eval_internal_harmonic_mean"),
+                        "ec": scores.get("eval_external_wilson"),
+                        "rc": scores.get("eval_stability_intra_session"),
+                        "internal_responsiveness": scores.get("eval_internal_responsiveness"),
+                        "internal_consistency": scores.get("eval_internal_consistency"),
+                        "inter_session_stability": scores.get("eval_stability_inter_session"),
+                        "intra_session_stability": scores.get("eval_stability_intra_session"),
                     }
                     job["status"] = "complete"
                     job["is_complete"] = True
