@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install dependencies + picon in one layer
 COPY api/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt "picon @ git+https://github.com/willystumblr/picon.git@packaging"
+RUN pip install picon-eval
 
 # Copy application
 COPY api/main.py .
