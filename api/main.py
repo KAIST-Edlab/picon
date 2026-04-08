@@ -39,6 +39,62 @@ logger = logging.getLogger("picon-api")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 redis_client: Optional[redis.Redis] = None
 
+# ---------------------------------------------------------------------------
+# Concurrency control
+# ---------------------------------------------------------------------------
+MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "15"))
+_job_semaphore: Optional[asyncio.Semaphore] = None
+_queued_job_ids: list = []  # ordered list of waiting job IDs for position tracking
+_queue_lock = asyncio.Lock()
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _job_semaphore
+    if _job_semaphore is None:
+        _job_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
+    return _job_semaphore
+
+
+# ---------------------------------------------------------------------------
+# API key pool — round-robin across multiple OpenAI keys
+# ---------------------------------------------------------------------------
+def _load_key_pool() -> list:
+    """Load OpenAI keys from OPENAI_API_KEYS (comma-separated) or fall back to OPENAI_API_KEY."""
+    multi = os.getenv("OPENAI_API_KEYS", "")
+    if multi:
+        keys = [k.strip() for k in multi.split(",") if k.strip()]
+        if keys:
+            return keys
+    single = os.getenv("OPENAI_API_KEY", "")
+    return [single] if single else []
+
+
+_openai_key_pool: list = _load_key_pool()
+_key_assignment_lock = threading.Lock()
+# Track how many active jobs each key index has
+_key_active_counts: Dict[int, int] = {i: 0 for i in range(len(_openai_key_pool))}
+
+
+def _acquire_key() -> tuple:
+    """Pick the least-loaded key. Returns (key_index, key_string)."""
+    if not _openai_key_pool:
+        return (-1, os.getenv("OPENAI_API_KEY", ""))
+    with _key_assignment_lock:
+        # Pick the key with fewest active jobs
+        idx = min(_key_active_counts, key=_key_active_counts.get)
+        _key_active_counts[idx] = _key_active_counts.get(idx, 0) + 1
+        logger.info("Assigned key pool[%d] (%d active on this key)", idx, _key_active_counts[idx])
+        return (idx, _openai_key_pool[idx])
+
+
+def _release_key(idx: int):
+    """Release a key slot back to the pool."""
+    if idx < 0:
+        return
+    with _key_assignment_lock:
+        _key_active_counts[idx] = max(0, _key_active_counts.get(idx, 1) - 1)
+        logger.info("Released key pool[%d] (%d active on this key)", idx, _key_active_counts[idx])
+
 JOB_TTL = 86400  # 24 hours
 
 # ---------------------------------------------------------------------------
@@ -54,11 +110,13 @@ USAGE_TTL = 86400 * 7  # keep cost keys for 7 days
 job_costs: Dict[str, float] = {}
 
 
-def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict):
+def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict, openai_key: str = ""):
     """
-    Runs inside a subprocess. Patches picon.utils.completion so every LiteLLM
-    call sends its cost back to the parent via result_queue, then calls picon.run().
+    Runs inside a subprocess. Sets the assigned OpenAI key in the subprocess
+    environment, then calls picon.run().
     """
+    if openai_key:
+        os.environ["OPENAI_API_KEY"] = openai_key
     import picon
 
     try:
@@ -152,7 +210,10 @@ PICON_AGENT_MODELS = {
 def get_redis() -> redis.Redis:
     global redis_client
     if redis_client is None:
-        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+        redis_client = redis.from_url(
+            REDIS_URL, decode_responses=True,
+            max_connections=20,
+        )
     return redis_client
 
 
@@ -486,7 +547,7 @@ async def agent_start(req: AgentStartRequest, request: Request):
     job_id = str(uuid.uuid4())
 
     job = {
-        "status": "running",
+        "status": "queued",
         "name": req.name,
         "model": req.model,
         "current_session": 1,
@@ -503,13 +564,13 @@ async def agent_start(req: AgentStartRequest, request: Request):
     # Persist to Redis
     _update_job_redis(job_id, job)
 
-    # Launch background task
+    # Launch background task (will wait for semaphore if at capacity)
     task = asyncio.create_task(
         _run_agent_evaluation(job_id, req)
     )
     job["task"] = task
 
-    return {"session_id": job_id, "status": "running"}
+    return {"session_id": job_id, "status": "queued"}
 
 
 @app.get("/api/agent/status/{job_id}")
@@ -523,6 +584,10 @@ async def agent_status(job_id: str):
             raise HTTPException(status_code=404, detail="Job not found")
         return data
 
+    queue_position = None
+    if job["status"] == "queued" and job_id in _queued_job_ids:
+        queue_position = _queued_job_ids.index(job_id) + 1
+
     return {
         "session_id": job_id,
         "status": job["status"],
@@ -533,6 +598,8 @@ async def agent_status(job_id: str):
         "is_complete": job["is_complete"],
         "error": job["error"],
         "cost_usd": round(job_costs.get(job_id, 0.0), 5),
+        "queue_position": queue_position,
+        "max_concurrent": MAX_CONCURRENT_JOBS,
     }
 
 
@@ -584,9 +651,37 @@ async def agent_cancel(job_id: str):
 
 
 async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
-    """Background task: runs picon in a subprocess and drains its result queue."""
+    """Background task: waits for a semaphore slot, then runs picon in a subprocess."""
     job = agent_jobs[job_id]
     job["logs"] = []
+
+    # --- Queue until a slot opens ---
+    sem = _get_semaphore()
+    async with _queue_lock:
+        _queued_job_ids.append(job_id)
+    logger.info("Job %s queued (position %d)", job_id, len(_queued_job_ids))
+
+    try:
+        await sem.acquire()
+    except asyncio.CancelledError:
+        async with _queue_lock:
+            if job_id in _queued_job_ids:
+                _queued_job_ids.remove(job_id)
+        job["status"] = "cancelled"
+        job["is_complete"] = True
+        return
+
+    # Slot acquired — remove from queue, mark running
+    async with _queue_lock:
+        if job_id in _queued_job_ids:
+            _queued_job_ids.remove(job_id)
+    job["status"] = "running"
+
+    # Acquire an API key from the pool
+    key_idx, openai_key = _acquire_key()
+    job["key_idx"] = key_idx
+    logger.info("Job %s started (slots: %d/%d used, key pool[%d])", job_id,
+                MAX_CONCURRENT_JOBS - sem._value, MAX_CONCURRENT_JOBS, key_idx)
 
     if req.mode == "external":
         run_kwargs = dict(
@@ -615,7 +710,7 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
     result_queue = multiprocessing.Queue()
     proc = multiprocessing.Process(
         target=_picon_worker,
-        args=(result_queue, run_kwargs),
+        args=(result_queue, run_kwargs, openai_key),
         daemon=True,
     )
     job["process"] = proc
@@ -687,6 +782,10 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
 
     finally:
         proc.join(timeout=5)
+        _release_key(key_idx)
+        sem.release()
+        logger.info("Job %s released slot + key pool[%d] (slots: %d/%d used)", job_id,
+                     key_idx, MAX_CONCURRENT_JOBS - sem._value, MAX_CONCURRENT_JOBS)
 
     _update_job_redis(job_id, {
         "status": job["status"],
@@ -817,6 +916,23 @@ async def get_usage():
 # ===========================================================================
 # Health
 # ===========================================================================
+
+@app.get("/api/queue")
+async def queue_info():
+    """Return current job queue status."""
+    sem = _get_semaphore()
+    running = MAX_CONCURRENT_JOBS - sem._value
+    with _key_assignment_lock:
+        key_usage = {f"key_{i}": count for i, count in _key_active_counts.items()}
+    return {
+        "max_concurrent": MAX_CONCURRENT_JOBS,
+        "running": running,
+        "queued": len(_queued_job_ids),
+        "available_slots": sem._value,
+        "key_pool_size": len(_openai_key_pool),
+        "key_usage": key_usage,
+    }
+
 
 @app.get("/api/health")
 async def health():

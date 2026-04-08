@@ -360,8 +360,13 @@
         if (!res.ok) { clearInterval(interval); return; }
         var data = await res.json();
 
-        agentProgress.textContent =
-          'Session ' + data.current_session + '/' + data.total_sessions + ' — Running...';
+        if (data.status === 'queued') {
+          var posText = data.queue_position ? ' (position ' + data.queue_position + ')' : '';
+          agentProgress.textContent = 'Queued' + posText + ' — waiting for available slot...';
+        } else {
+          agentProgress.textContent =
+            'Session ' + data.current_session + '/' + data.total_sessions + ' — Running...';
+        }
 
         if (data.is_complete) {
           clearInterval(interval);
