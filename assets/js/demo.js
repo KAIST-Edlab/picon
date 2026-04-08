@@ -158,13 +158,53 @@
 
       expSessionId = data.session_id;
       setProgress(expProgress, data.progress);
-      addMessage(expMessages, 'system', data.first_question);
+
+      if (data.status === 'queued') {
+        // Server is at capacity — poll until a slot opens
+        addMessage(expMessages, 'info', 'Server is busy. You are in the queue — please wait...');
+        var firstQuestion = await pollExperienceQueue(expSessionId, expMessages);
+        if (!firstQuestion) {
+          addMessage(expMessages, 'info', 'Failed to start interview. Please try again later.');
+          return;
+        }
+        addMessage(expMessages, 'system', firstQuestion);
+      } else {
+        addMessage(expMessages, 'system', data.first_question);
+      }
       expSend.disabled = false;
       expInput.focus();
     } catch (err) {
       addMessage(expMessages, 'info', 'Error: ' + err.message);
     }
   });
+
+  async function pollExperienceQueue(sessionId, messagesEl) {
+    // Poll /api/experience/status until we get the first question or an error.
+    var lastPos = null;
+    while (true) {
+      await new Promise(function (r) { setTimeout(r, 2000); });
+      try {
+        var res = await fetch(API_BASE + '/api/experience/status/' + sessionId);
+        if (!res.ok) return null;
+        var data = await res.json();
+
+        // Update queue position message
+        if (data.status === 'queued' && data.queue_position) {
+          var posMsg = 'Queue position: ' + data.queue_position + ' — please wait...';
+          if (data.queue_position !== lastPos) {
+            addMessage(messagesEl, 'info', posMsg);
+            lastPos = data.queue_position;
+          }
+        }
+
+        if (data.status === 'error') return null;
+        if (data.first_question) return data.first_question;
+        if (data.status === 'running' && !data.first_question) continue; // still loading
+      } catch (e) {
+        return null;
+      }
+    }
+  }
 
   async function sendExperienceResponse() {
     var text = expInput.value.trim();

@@ -45,7 +45,7 @@ redis_client: Optional[redis.Redis] = None
 MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "15"))
 _job_semaphore: Optional[asyncio.Semaphore] = None
 _queued_job_ids: list = []  # ordered list of waiting job IDs for position tracking
-_queue_lock = asyncio.Lock()
+_queue_lock: Optional[asyncio.Lock] = None
 
 
 def _get_semaphore() -> asyncio.Semaphore:
@@ -53,6 +53,13 @@ def _get_semaphore() -> asyncio.Semaphore:
     if _job_semaphore is None:
         _job_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
     return _job_semaphore
+
+
+def _get_queue_lock() -> asyncio.Lock:
+    global _queue_lock
+    if _queue_lock is None:
+        _queue_lock = asyncio.Lock()
+    return _queue_lock
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +120,7 @@ job_costs: Dict[str, float] = {}
 def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict, openai_key: str = ""):
     """
     Runs inside a subprocess. Sets the assigned OpenAI key in the subprocess
-    environment, then calls picon.run().
+    environment, then calls picon.run(). Used by both Agent Test and Experience modes.
     """
     if openai_key:
         os.environ["OPENAI_API_KEY"] = openai_key
@@ -356,7 +363,11 @@ async def bridge_chat_completions(session_id: str, request: Request):
 
 @app.post("/api/start")
 async def experience_start(req: ExperienceStartRequest, request: Request):
-    """Start Experience Mode: launches picon.run() with bridge as the agent endpoint."""
+    """Start Experience Mode: launches picon.run() with bridge as the agent endpoint.
+
+    If all concurrency slots are full the session enters 'queued' status and the
+    response returns immediately so the browser can poll /api/experience/status.
+    """
     ip = _client_ip(request)
     _check_ip_budget(ip)
 
@@ -370,41 +381,92 @@ async def experience_start(req: ExperienceStartRequest, request: Request):
         "question_queue": queue.Queue(),
         "response_queue": queue.Queue(),
         "task": None,
-        "status": "running",
+        "status": "queued",
         "progress": {"phase": "init", "current": 0, "total": req.num_turns},
         "result": None,
         "error": None,
         "name": req.name,
         "turn_count": -1,
         "client_ip": ip,
+        "key_idx": -1,
     }
     sessions[session_id] = session
 
-    # Launch picon.run() in background
+    # Launch background task (will wait for semaphore if at capacity)
     task = asyncio.create_task(
         _run_experience_session(session_id, req.name, agent_api_base, req.num_turns)
     )
     session["task"] = task
 
-    # Wait for the first message from picon (the instruction/welcome message)
-    try:
-        first_q = await asyncio.to_thread(
-            session["question_queue"].get, timeout=60
-        )
-    except queue.Empty:
-        error = session.get("error") or "Timeout waiting for first question"
-        raise HTTPException(status_code=500, detail=error)
+    # If a slot is available, wait briefly for the first question so the UX
+    # stays snappy. Otherwise return immediately with queued status.
+    sem = _get_semaphore()
+    if sem._value > 0:
+        # Slot likely available — wait for the first question
+        try:
+            first_q = await asyncio.to_thread(
+                session["question_queue"].get, timeout=60
+            )
+        except queue.Empty:
+            error = session.get("error") or "Timeout waiting for first question"
+            raise HTTPException(status_code=500, detail=error)
 
-    # If picon failed immediately, __COMPLETE__ is the first message
-    if first_q.get("question") == "__COMPLETE__":
-        error = session.get("error") or "Interview failed to start"
-        raise HTTPException(status_code=500, detail=error)
+        if first_q.get("question") == "__COMPLETE__":
+            error = session.get("error") or "Interview failed to start"
+            raise HTTPException(status_code=500, detail=error)
 
+        return {
+            "session_id": session_id,
+            "status": "running",
+            "first_question": first_q["question"],
+            "progress": session["progress"],
+        }
+
+    # No slots — return queued status, frontend will poll
     return {
         "session_id": session_id,
-        "first_question": first_q["question"],
+        "status": "queued",
+        "first_question": None,
         "progress": session["progress"],
     }
+
+
+@app.get("/api/experience/status/{session_id}")
+async def experience_status(session_id: str):
+    """Poll experience session status — used when session was queued at start."""
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    queue_position = None
+    if session["status"] == "queued" and session_id in _queued_job_ids:
+        queue_position = _queued_job_ids.index(session_id) + 1
+
+    resp = {
+        "session_id": session_id,
+        "status": session["status"],
+        "queue_position": queue_position,
+        "max_concurrent": MAX_CONCURRENT_JOBS,
+        "progress": session["progress"],
+        "first_question": None,
+    }
+
+    # If it transitioned to running, try to grab the first question
+    if session["status"] == "running":
+        try:
+            first_q = session["question_queue"].get_nowait()
+            if first_q.get("question") == "__COMPLETE__":
+                resp["status"] = session["status"]
+                resp["error"] = session.get("error") or "Interview failed to start"
+            else:
+                resp["first_question"] = first_q["question"]
+        except queue.Empty:
+            pass  # not ready yet, keep polling
+
+    if session["status"] == "error":
+        resp["error"] = session.get("error")
+
+    return resp
 
 
 @app.post("/api/respond")
@@ -478,50 +540,113 @@ async def experience_results(session_id: str):
 async def _run_experience_session(
     session_id: str, name: str, agent_api_base: str, num_turns: int
 ):
-    """Background task: run picon.run() with the bridge as the agent."""
-    import picon
+    """Background task: waits for a semaphore slot, then runs picon.run() in a subprocess.
 
+    picon communicates with the browser via HTTP calls to the bridge endpoint,
+    so running in a subprocess is safe — no shared queues cross the process boundary.
+    """
     session = sessions[session_id]
+    qlock = _get_queue_lock()
 
-    def _run_with_context(*args, **kwargs):
-        _job_context.job_id = session_id
-        try:
-            return picon.run(*args, **kwargs)
-        finally:
-            _job_context.job_id = None
+    # --- Queue until a slot opens ---
+    sem = _get_semaphore()
+    async with qlock:
+        _queued_job_ids.append(session_id)
+    logger.info("Experience %s queued (position %d)", session_id, len(_queued_job_ids))
 
     try:
-        result = await asyncio.to_thread(
-            _run_with_context,
+        await sem.acquire()
+    except asyncio.CancelledError:
+        async with qlock:
+            if session_id in _queued_job_ids:
+                _queued_job_ids.remove(session_id)
+        session["status"] = "cancelled"
+        session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
+        return
+
+    key_idx = -1
+    proc = None
+    try:
+        async with qlock:
+            if session_id in _queued_job_ids:
+                _queued_job_ids.remove(session_id)
+        session["status"] = "running"
+
+        # Acquire an API key from the pool
+        key_idx, openai_key = _acquire_key()
+        session["key_idx"] = key_idx
+        logger.info("Experience %s started (slots: %d/%d used, key pool[%d])",
+                     session_id, MAX_CONCURRENT_JOBS - sem._value, MAX_CONCURRENT_JOBS, key_idx)
+
+        run_kwargs = dict(
             persona="",  # no system prompt — the human IS the persona
             name=name,
             model="human",
             api_base=agent_api_base,
             num_turns=num_turns,
-            num_sessions=1,  # single session for experience mode
+            num_sessions=1,
             do_eval=True,
             output_dir="/tmp/picon_results",
             **PICON_AGENT_MODELS,
         )
 
-        scores = result.eval_scores or {}
-        session["result"] = {
-            "ic": scores.get("eval_internal_harmonic_mean"),
-            "ec": scores.get("eval_external_wilson"),
-            "rc": scores.get("eval_stability_intra_session"),
-        }
-        session["status"] = "complete"
+        result_queue = multiprocessing.Queue()
+        proc = multiprocessing.Process(
+            target=_picon_worker,
+            args=(result_queue, run_kwargs, openai_key),
+            daemon=True,
+        )
+        session["process"] = proc
+        proc.start()
 
-        # Signal completion to the browser
+        # Drain results from the subprocess
+        while proc.is_alive() or not result_queue.empty():
+            try:
+                msg_type, payload = await asyncio.to_thread(result_queue.get, timeout=1)
+            except queue.Empty:
+                continue
+
+            if msg_type == "result":
+                result = payload
+                scores = result.eval_scores or {}
+                session["result"] = {
+                    "ic": scores.get("eval_internal_harmonic_mean"),
+                    "ec": scores.get("eval_external_wilson"),
+                    "rc": scores.get("eval_stability_intra_session"),
+                }
+                session["status"] = "complete"
+                session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
+                logger.info("Experience session complete for %s", name)
+
+            elif msg_type == "cost":
+                _add_job_cost(session_id, payload)
+
+            elif msg_type == "error":
+                logger.error("Experience session error for %s: %s", name, payload)
+                session["status"] = "error"
+                session["error"] = payload
+                session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
+
+    except asyncio.CancelledError:
+        if proc and proc.is_alive():
+            proc.terminate()
+        session["status"] = "cancelled"
         session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
-
-        logger.info("Experience session complete for %s", name)
 
     except Exception as e:
         logger.exception("Experience session error for %s", name)
+        if proc and proc.is_alive():
+            proc.terminate()
         session["status"] = "error"
         session["error"] = str(e)
         session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
+
+    finally:
+        if proc:
+            proc.join(timeout=5)
+        _release_key(key_idx)
+        sem.release()
+        logger.info("Experience %s released slot + key pool[%d]", session_id, key_idx)
 
 
 # ===========================================================================
@@ -639,14 +764,23 @@ async def agent_logs(job_id: str, since: int = 0):
 
 @app.delete("/api/agent/cancel/{job_id}")
 async def agent_cancel(job_id: str):
-    """Cancel a running agent evaluation."""
+    """Cancel a running agent evaluation.
+
+    The background task's own try/finally handles semaphore and key release
+    when the asyncio.Task is cancelled, so we just cancel the task here.
+    """
     job = agent_jobs.get(job_id)
     if job:
-        proc = job.get("process")
-        if proc and proc.is_alive():
-            proc.terminate()
-        job["status"] = "cancelled"
-        job["is_complete"] = True
+        task = job.get("task")
+        if task and not task.done():
+            task.cancel()
+        else:
+            # Task already finished — just mark it
+            proc = job.get("process")
+            if proc and proc.is_alive():
+                proc.terminate()
+            job["status"] = "cancelled"
+            job["is_complete"] = True
     return {"status": "cancelled"}
 
 
@@ -654,71 +788,75 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
     """Background task: waits for a semaphore slot, then runs picon in a subprocess."""
     job = agent_jobs[job_id]
     job["logs"] = []
+    qlock = _get_queue_lock()
 
     # --- Queue until a slot opens ---
     sem = _get_semaphore()
-    async with _queue_lock:
+    async with qlock:
         _queued_job_ids.append(job_id)
     logger.info("Job %s queued (position %d)", job_id, len(_queued_job_ids))
 
     try:
         await sem.acquire()
     except asyncio.CancelledError:
-        async with _queue_lock:
+        async with qlock:
             if job_id in _queued_job_ids:
                 _queued_job_ids.remove(job_id)
         job["status"] = "cancelled"
         job["is_complete"] = True
         return
 
-    # Slot acquired — remove from queue, mark running
-    async with _queue_lock:
-        if job_id in _queued_job_ids:
-            _queued_job_ids.remove(job_id)
-    job["status"] = "running"
-
-    # Acquire an API key from the pool
-    key_idx, openai_key = _acquire_key()
-    job["key_idx"] = key_idx
-    logger.info("Job %s started (slots: %d/%d used, key pool[%d])", job_id,
-                MAX_CONCURRENT_JOBS - sem._value, MAX_CONCURRENT_JOBS, key_idx)
-
-    if req.mode == "external":
-        run_kwargs = dict(
-            name=req.name,
-            api_base=req.api_base,
-            num_turns=req.num_turns,
-            num_sessions=req.num_sessions,
-            do_eval=True,
-            output_dir="/tmp/picon_results",
-            **PICON_AGENT_MODELS,
-        )
-    else:
-        run_kwargs = dict(
-            persona=req.persona,
-            name=req.name,
-            model=req.model or "openai/custom",
-            api_base=req.api_base or None,
-            api_key=req.api_key or None,
-            num_turns=req.num_turns,
-            num_sessions=req.num_sessions,
-            do_eval=True,
-            output_dir="/tmp/picon_results",
-            **PICON_AGENT_MODELS,
-        )
-
-    result_queue = multiprocessing.Queue()
-    proc = multiprocessing.Process(
-        target=_picon_worker,
-        args=(result_queue, run_kwargs, openai_key),
-        daemon=True,
-    )
-    job["process"] = proc
-    proc.start()
-
-    ip = job.get("client_ip", "unknown")
-
+    # Everything below must release sem (and key once acquired) on any exit path.
+    key_idx = -1
+    proc = None
     try:
+        # Slot acquired — remove from queue, mark running
+        async with qlock:
+            if job_id in _queued_job_ids:
+                _queued_job_ids.remove(job_id)
+        job["status"] = "running"
+
+        # Acquire an API key from the pool
+        key_idx, openai_key = _acquire_key()
+        job["key_idx"] = key_idx
+        logger.info("Job %s started (slots: %d/%d used, key pool[%d])", job_id,
+                     MAX_CONCURRENT_JOBS - sem._value, MAX_CONCURRENT_JOBS, key_idx)
+
+        if req.mode == "external":
+            run_kwargs = dict(
+                name=req.name,
+                api_base=req.api_base,
+                num_turns=req.num_turns,
+                num_sessions=req.num_sessions,
+                do_eval=True,
+                output_dir="/tmp/picon_results",
+                **PICON_AGENT_MODELS,
+            )
+        else:
+            run_kwargs = dict(
+                persona=req.persona,
+                name=req.name,
+                model=req.model or "openai/custom",
+                api_base=req.api_base or None,
+                api_key=req.api_key or None,
+                num_turns=req.num_turns,
+                num_sessions=req.num_sessions,
+                do_eval=True,
+                output_dir="/tmp/picon_results",
+                **PICON_AGENT_MODELS,
+            )
+
+        result_queue = multiprocessing.Queue()
+        proc = multiprocessing.Process(
+            target=_picon_worker,
+            args=(result_queue, run_kwargs, openai_key),
+            daemon=True,
+        )
+        job["process"] = proc
+        proc.start()
+
+        ip = job.get("client_ip", "unknown")
+
         while proc.is_alive() or not result_queue.empty():
             try:
                 msg_type, payload = await asyncio.to_thread(result_queue.get, timeout=1)
@@ -767,21 +905,22 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
                 job["error"] = payload
 
     except asyncio.CancelledError:
-        if proc.is_alive():
+        if proc and proc.is_alive():
             proc.terminate()
         job["status"] = "cancelled"
         job["is_complete"] = True
 
     except Exception as e:
         logger.exception("Agent eval error for %s", req.name)
-        if proc.is_alive():
+        if proc and proc.is_alive():
             proc.terminate()
         job["status"] = "error"
         job["is_complete"] = True
         job["error"] = str(e)
 
     finally:
-        proc.join(timeout=5)
+        if proc:
+            proc.join(timeout=5)
         _release_key(key_idx)
         sem.release()
         logger.info("Job %s released slot + key pool[%d] (slots: %d/%d used)", job_id,
