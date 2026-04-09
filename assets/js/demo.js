@@ -131,6 +131,7 @@
   var expProgress = document.getElementById('exp-progress');
   var expSessionId = null;
   var expLoading = false;
+  var expHeartbeat = null;
 
   document.getElementById('exp-start-btn').addEventListener('click', async function () {
     var name = document.getElementById('exp-name').value.trim();
@@ -174,6 +175,12 @@
       }
       expSend.disabled = false;
       expInput.focus();
+
+      // Heartbeat: periodically ping the server so it knows we're still here
+      expHeartbeat = setInterval(function () {
+        if (!expSessionId) { clearInterval(expHeartbeat); return; }
+        fetch(API_BASE + '/api/experience/status/' + expSessionId).catch(function () {});
+      }, 30000); // every 30s
     } catch (err) {
       addMessage(expMessages, 'info', 'Error: ' + err.message);
     }
@@ -232,29 +239,47 @@
       setProgress(expProgress, data.progress);
 
       if (data.is_complete) {
+        if (expHeartbeat) { clearInterval(expHeartbeat); expHeartbeat = null; }
         addMessage(expMessages, 'info', 'Interview complete! Calculating your consistency scores...');
         expSend.disabled = true;
         expInput.disabled = true;
 
-        try {
-          var rRes = await fetch(API_BASE + '/api/results/' + expSessionId);
-          if (rRes.ok) {
-            var results = await rRes.json();
-            var expResultsEl = document.getElementById('exp-results');
-            expResultsEl.style.display = 'block';
-            renderScoreGrid(
-              document.getElementById('exp-score-grid'),
-              results.results.eval_scores || {}
-            );
-          }
-        } catch (e) {
-          addMessage(expMessages, 'info', 'Results saved. Thank you for participating!');
+        // Poll for results — eval may still be running after interview ends
+        var maxWait = 600; // 10 min max
+        var waited = 0;
+        while (waited < maxWait) {
+          try {
+            var rRes = await fetch(API_BASE + '/api/results/' + expSessionId);
+            if (rRes.ok) {
+              var results = await rRes.json();
+              if (results.status === 'complete' && results.results && results.results.eval_scores) {
+                var expResultsEl = document.getElementById('exp-results');
+                expResultsEl.style.display = 'block';
+                renderScoreGrid(
+                  document.getElementById('exp-score-grid'),
+                  results.results.eval_scores || {}
+                );
+                break;
+              } else if (results.status === 'error') {
+                addMessage(expMessages, 'info', 'Error during evaluation: ' + (results.error || 'Unknown error'));
+                break;
+              }
+              // status === 'pending' — keep polling
+            }
+          } catch (e) { /* retry */ }
+          await new Promise(function (r) { setTimeout(r, 5000); });
+          waited += 5;
+        }
+        if (waited >= maxWait) {
+          addMessage(expMessages, 'info', 'Evaluation is taking longer than expected. Please check back later.');
         }
         return;
       }
 
       if (data.next_question) {
         addMessage(expMessages, 'system', data.next_question);
+      } else if (data.error) {
+        addMessage(expMessages, 'info', 'Error: ' + data.error);
       }
     } catch (err) {
       typing.remove();

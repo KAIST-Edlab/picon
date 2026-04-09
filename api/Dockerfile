@@ -14,10 +14,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && uvicorn --version \
-    && python -c "import fastapi; import redis; print('deps OK')"
+    && python -c "import fastapi; print('deps OK')"
 
 # Copy application
 COPY api/main.py .
+
+# Copy static frontend (for local/Docker testing; not used on Railway)
+COPY test-frontend/index.html static/index.html
+COPY assets/ static/assets/
 
 # Expose port
 EXPOSE 8000

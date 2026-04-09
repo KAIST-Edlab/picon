@@ -11,11 +11,11 @@ Agent Test Mode simply calls picon.run() with the user's external API endpoint.
 """
 
 import asyncio
-import json
 import logging
 import multiprocessing
 import os
 import queue
+import sqlite3
 import threading
 import time
 import uuid
@@ -23,7 +23,6 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Dict, Optional
 
-import redis
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,10 +34,63 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("picon-api")
 
 # ---------------------------------------------------------------------------
-# Redis
+# SQLite for persistent storage (leaderboard + completed results)
 # ---------------------------------------------------------------------------
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-redis_client: Optional[redis.Redis] = None
+SQLITE_PATH = os.getenv("SQLITE_PATH", "/tmp/picon_data.db")
+_sqlite_lock = threading.Lock()
+
+
+def _init_db():
+    """Create tables if they don't exist."""
+    with _sqlite_lock:
+        conn = sqlite3.connect(SQLITE_PATH)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS leaderboard (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                model TEXT NOT NULL,
+                type TEXT NOT NULL DEFAULT 'community',
+                arch TEXT NOT NULL DEFAULT 'Community',
+                turns INTEGER NOT NULL DEFAULT 50,
+                ic REAL NOT NULL DEFAULT 0,
+                ec REAL NOT NULL DEFAULT 0,
+                rc REAL NOT NULL DEFAULT 0,
+                timestamp REAL NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS completed_jobs (
+                job_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                model TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                ic REAL,
+                ec REAL,
+                rc REAL,
+                internal_responsiveness REAL,
+                internal_consistency REAL,
+                inter_session_stability REAL,
+                intra_session_stability REAL,
+                error TEXT,
+                cost_usd REAL NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS cost_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                ip TEXT NOT NULL,
+                cost REAL NOT NULL,
+                date TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cost_log_ip_date ON cost_log (ip, date)"
+        )
+        conn.commit()
+        conn.close()
 
 # ---------------------------------------------------------------------------
 # Concurrency control
@@ -107,19 +159,24 @@ def _release_key(idx: int):
         _key_active_counts[idx] = max(0, _key_active_counts.get(idx, 1) - 1)
         logger.info("Released key pool[%d] (%d active on this key)", idx, _key_active_counts[idx])
 
-JOB_TTL = 86400  # 24 hours
+# picon uses the first 10 turns for pre-screening questions;
+# the user-facing "num_turns" includes those, so subtract before calling picon.run().
+# picon's max_turns already includes the 10 predefined get-to-know questions,
+# so we pass the user's requested turns directly (no subtraction needed).
+# The repeat phase (10 more turns) runs on top of max_turns automatically.
 
 # ---------------------------------------------------------------------------
-# Usage / Budget tracking
+# Usage / Budget tracking  (SQLite-backed, survives restarts)
 # ---------------------------------------------------------------------------
 # Hard cap per individual job (prevents a single runaway evaluation). 0 = off.
 MAX_COST_PER_JOB = float(os.getenv("MAX_COST_PER_JOB", "3.0"))
 # Daily per-IP budget — once an IP crosses this, new jobs are rejected. 0 = off.
 MAX_COST_PER_IP_DAILY = float(os.getenv("MAX_COST_PER_IP_DAILY", "10.0"))
-USAGE_TTL = 86400 * 7  # keep cost keys for 7 days
 
-# In-memory cost map: job_id -> cumulative USD spent
-job_costs: Dict[str, float] = {}
+# In-memory cache for per-job totals (fast path; rebuilt from SQLite on restart isn't
+# needed because per-job cost only matters while the job is running).
+_cost_lock = threading.Lock()
+job_costs: Dict[str, float] = {}  # job_id -> cumulative USD
 
 
 def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict, openai_key: str = ""):
@@ -146,24 +203,28 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _ip_day_key(ip: str) -> str:
-    return f"usage:ip:{ip}:{time.strftime('%Y-%m-%d')}"
-
-
 def _get_ip_daily_cost(ip: str) -> float:
+    """Read today's cumulative cost for an IP from SQLite."""
+    today = time.strftime("%Y-%m-%d")
     try:
-        r = get_redis()
-        val = r.get(_ip_day_key(ip))
-        return float(val) if val else 0.0
-    except Exception:
+        with _sqlite_lock:
+            conn = sqlite3.connect(SQLITE_PATH)
+            row = conn.execute(
+                "SELECT COALESCE(SUM(cost), 0) FROM cost_log WHERE ip = ? AND date = ?",
+                (ip, today),
+            ).fetchone()
+            conn.close()
+            return float(row[0]) if row else 0.0
+    except Exception as e:
+        logger.warning("_get_ip_daily_cost failed for %s: %s", ip, e)
         return 0.0
 
 
-def _check_ip_budget(ip: str):
+async def _check_ip_budget(ip: str):
     """Raise HTTP 429 if the IP has already exceeded its daily budget."""
     if MAX_COST_PER_IP_DAILY <= 0:
         return
-    spent = _get_ip_daily_cost(ip)
+    spent = await asyncio.to_thread(_get_ip_daily_cost, ip)
     if spent >= MAX_COST_PER_IP_DAILY:
         raise HTTPException(
             status_code=429,
@@ -172,26 +233,26 @@ def _check_ip_budget(ip: str):
 
 
 def _add_job_cost(job_id: str, cost: float) -> float:
-    """Accumulate *cost* for a job; also update per-IP and global daily counters."""
-    job_costs[job_id] = job_costs.get(job_id, 0.0) + cost
-    job_total = job_costs[job_id]
+    """Accumulate cost for a job. Writes to in-memory cache + SQLite."""
+    with _cost_lock:
+        job_costs[job_id] = job_costs.get(job_id, 0.0) + cost
+        job_total = job_costs[job_id]
 
+    # Persist to SQLite
+    job = agent_jobs.get(job_id) or sessions.get(job_id, {})
+    ip = job.get("client_ip", "unknown")
+    today = time.strftime("%Y-%m-%d")
     try:
-        r = get_redis()
-        # Per-job running total
-        r.setex(f"cost:{job_id}", USAGE_TTL, job_total)
-        # Per-IP daily total
-        job = agent_jobs.get(job_id) or sessions.get(job_id, {})
-        ip = job.get("client_ip", "unknown")
-        ip_key = _ip_day_key(ip)
-        ip_total = r.incrbyfloat(ip_key, cost)
-        r.expire(ip_key, USAGE_TTL)
-        # Global daily total
-        day_key = f"usage:daily:{time.strftime('%Y-%m-%d')}"
-        r.incrbyfloat(day_key, cost)
-        r.expire(day_key, USAGE_TTL)
-    except Exception:
-        ip_total = 0.0
+        with _sqlite_lock:
+            conn = sqlite3.connect(SQLITE_PATH)
+            conn.execute(
+                "INSERT INTO cost_log (job_id, ip, cost, date, created_at) VALUES (?, ?, ?, ?, ?)",
+                (job_id, ip, cost, today, time.time()),
+            )
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        logger.warning("_add_job_cost SQLite write failed for job %s: %s", job_id, e)
 
     return job_total
 
@@ -219,14 +280,70 @@ PICON_AGENT_MODELS = {
 }
 
 
-def get_redis() -> redis.Redis:
-    global redis_client
-    if redis_client is None:
-        redis_client = redis.from_url(
-            REDIS_URL, decode_responses=True,
-            max_connections=20,
-        )
-    return redis_client
+# ---------------------------------------------------------------------------
+# Completed job archive (SQLite-backed, survives restarts)
+# ---------------------------------------------------------------------------
+
+def _archive_job(job_id: str, data: dict):
+    """Persist a completed job to SQLite."""
+    scores = data.get("scores") or {}
+    try:
+        with _sqlite_lock:
+            conn = sqlite3.connect(SQLITE_PATH)
+            conn.execute(
+                """INSERT OR REPLACE INTO completed_jobs
+                   (job_id, name, model, status, ic, ec, rc,
+                    internal_responsiveness, internal_consistency,
+                    inter_session_stability, intra_session_stability,
+                    error, cost_usd, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (job_id, data.get("name", ""), data.get("model", ""),
+                 data.get("status", "unknown"),
+                 scores.get("ic"), scores.get("ec"), scores.get("rc"),
+                 scores.get("internal_responsiveness"),
+                 scores.get("internal_consistency"),
+                 scores.get("inter_session_stability"),
+                 scores.get("intra_session_stability"),
+                 data.get("error"), data.get("cost_usd", 0.0), time.time()),
+            )
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        logger.warning("Failed to archive job %s: %s", job_id, e)
+
+
+def _get_archived_job(job_id: str) -> Optional[dict]:
+    """Retrieve a completed job from SQLite."""
+    try:
+        with _sqlite_lock:
+            conn = sqlite3.connect(SQLITE_PATH)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM completed_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            conn.close()
+            if not row:
+                return None
+            row = dict(row)
+        scores = {
+            "ic": row["ic"], "ec": row["ec"], "rc": row["rc"],
+            "internal_responsiveness": row["internal_responsiveness"],
+            "internal_consistency": row["internal_consistency"],
+            "inter_session_stability": row["inter_session_stability"],
+            "intra_session_stability": row["intra_session_stability"],
+        }
+        return {
+            "session_id": row["job_id"],
+            "status": row["status"],
+            "name": row["name"],
+            "is_complete": True,
+            "scores": scores,
+            "error": row["error"],
+            "cost_usd": row["cost_usd"],
+        }
+    except Exception as e:
+        logger.warning("Failed to retrieve archived job %s: %s", job_id, e)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -237,14 +354,10 @@ def get_redis() -> redis.Redis:
 async def lifespan(app: FastAPI):
     # Expand default thread pool so Experience Mode bridge doesn't starve
     loop = asyncio.get_running_loop()
-    loop.set_default_executor(ThreadPoolExecutor(max_workers=200))
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=300))
 
-    try:
-        r = get_redis()
-        r.ping()
-        logger.info("Redis connected: %s", REDIS_URL)
-    except Exception as e:
-        logger.warning("Redis not available: %s", e)
+    _init_db()
+    logger.info("SQLite leaderboard initialized at %s", SQLITE_PATH)
     yield
     logger.info("Shutting down, %d active sessions", len(sessions))
 
@@ -340,23 +453,12 @@ async def bridge_chat_completions(session_id: str, request: Request):
     })
     session["turn_count"] = session.get("turn_count", 0) + 1
 
-    # Wait for the human to respond, checking for abandonment periodically
-    human_response = None
-    deadline = time.time() + 120  # max 2 min total wait per question
-    while time.time() < deadline:
-        # Check if session was abandoned (browser stopped polling)
-        last_poll = session.get("last_poll_time", time.time())
-        if time.time() - last_poll > EXPERIENCE_ABANDON_TIMEOUT:
-            logger.warning("Experience %s abandoned (no poll for %ds)", session_id, EXPERIENCE_ABANDON_TIMEOUT)
-            raise HTTPException(status_code=410, detail="Session abandoned")
-        try:
-            human_response = await asyncio.to_thread(
-                session["response_queue"].get, timeout=5  # check every 5s
-            )
-            break
-        except queue.Empty:
-            continue
-    if human_response is None:
+    # Wait for the human to respond (abandon detection is handled by the drain loop)
+    try:
+        human_response = await asyncio.to_thread(
+            session["response_queue"].get, timeout=300  # 5 min max per question
+        )
+    except queue.Empty:
         human_response = "I'd rather not answer that."
 
     # Return as OpenAI chat completion format
@@ -389,7 +491,7 @@ async def experience_start(req: ExperienceStartRequest, request: Request):
     response returns immediately so the browser can poll /api/experience/status.
     """
     ip = _client_ip(request)
-    _check_ip_budget(ip)
+    await _check_ip_budget(ip)
 
     session_id = str(uuid.uuid4())
 
@@ -414,9 +516,12 @@ async def experience_start(req: ExperienceStartRequest, request: Request):
     }
     sessions[session_id] = session
 
+    # Subtract pre-screening turns so picon gets pure interview turn count
+    picon_turns = max(req.num_turns, 15)
+
     # Launch background task (will wait for semaphore if at capacity)
     task = asyncio.create_task(
-        _run_experience_session(session_id, req.name, agent_api_base, req.num_turns)
+        _run_experience_session(session_id, req.name, agent_api_base, picon_turns)
     )
     session["task"] = task
 
@@ -504,24 +609,34 @@ async def experience_respond(req: ExperienceRespondRequest):
     # Put human's response in the queue for picon to pick up
     session["response_queue"].put(req.response)
 
-    # Wait for picon to process and produce the next question (or finish)
-    try:
-        next_q = await asyncio.to_thread(
-            session["question_queue"].get, timeout=120  # 2 min for picon to process
-        )
-    except queue.Empty:
-        # picon might have finished
-        if session["status"] == "complete":
-            return {
-                "next_question": None,
-                "is_complete": True,
-                "progress": session["progress"],
-            }
+    # Wait for picon to process and produce the next question (or finish).
+    # Under heavy load LLM calls can be slow, so we retry with a long total deadline
+    # rather than giving up after a single timeout.
+    next_q = None
+    deadline = time.time() + 600  # 10 min total patience
+    while time.time() < deadline:
+        try:
+            next_q = await asyncio.to_thread(
+                session["question_queue"].get, timeout=10  # check every 10s
+            )
+            break
+        except queue.Empty:
+            # Check if picon finished or errored while we were waiting
+            if session["status"] in ("complete", "error", "cancelled"):
+                return {
+                    "next_question": None,
+                    "is_complete": True,
+                    "progress": session["progress"],
+                }
+            continue  # keep waiting
+
+    if next_q is None:
+        # Timed out after full deadline — something is stuck
         return {
             "next_question": None,
-            "is_complete": False,
+            "is_complete": True,
             "progress": session["progress"],
-            "error": "Timeout waiting for next question",
+            "error": "Timed out waiting for next question",
         }
 
     # Check if it's a completion signal
@@ -532,7 +647,9 @@ async def experience_respond(req: ExperienceRespondRequest):
             "progress": session["progress"],
         }
 
-    session["progress"]["current"] = next_q.get("turn", 0)
+    # next_q["turn"]: -1=instruction, 0=first question, 1=second, ...
+    # Display as 1-based, skipping instruction
+    session["progress"]["current"] = next_q.get("turn", 0) + 1
 
     return {
         "next_question": next_q["question"],
@@ -548,17 +665,31 @@ async def experience_results(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if session["status"] != "complete":
-        raise HTTPException(status_code=400, detail="Interview not yet complete")
+    if session["status"] == "complete" and session.get("result"):
+        result = session.get("result", {})
+        # Cleanup
+        sessions.pop(session_id, None)
+        return {
+            "session_id": session_id,
+            "status": "complete",
+            "results": {"eval_scores": result},
+        }
 
-    result = session.get("result", {})
+    if session["status"] in ("error", "cancelled"):
+        error = session.get("error", "Unknown error")
+        sessions.pop(session_id, None)
+        return {
+            "session_id": session_id,
+            "status": "error",
+            "error": error,
+            "results": {"eval_scores": {}},
+        }
 
-    # Cleanup
-    sessions.pop(session_id, None)
-
+    # Still running (eval in progress)
     return {
         "session_id": session_id,
-        "results": {"eval_scores": result},
+        "status": "pending",
+        "results": None,
     }
 
 
@@ -611,7 +742,7 @@ async def _run_experience_session(
             num_turns=num_turns,
             num_sessions=1,
             do_eval=True,
-            output_dir="/tmp/picon_results",
+            output_dir=f"/tmp/picon_results/{session_id}",
             **PICON_AGENT_MODELS,
         )
 
@@ -655,14 +786,16 @@ async def _run_experience_session(
             if msg_type == "result":
                 result = payload
                 scores = result.eval_scores or {}
+                logger.info("Experience eval_scores keys for %s: %s", name, list(scores.keys()))
+                logger.info("Experience eval_scores for %s: %s", name, scores)
                 session["result"] = {
-                    "ic": scores.get("eval_internal_harmonic_mean"),
-                    "ec": scores.get("eval_external_wilson"),
-                    "rc": scores.get("eval_stability_intra_session"),
+                    "ic": scores.get("internal_harmonic_mean"),
+                    "ec": scores.get("external_ec"),
+                    "rc": scores.get("intra_session_stability"),
                 }
                 session["status"] = "complete"
                 session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
-                logger.info("Experience session complete for %s", name)
+                logger.info("Experience session complete for %s: %s", name, session["result"])
 
             elif msg_type == "cost":
                 _add_job_cost(session_id, payload)
@@ -713,7 +846,7 @@ async def agent_start(req: AgentStartRequest, request: Request):
             raise HTTPException(status_code=400, detail="Persona / system prompt is required for quick agent mode")
 
     ip = _client_ip(request)
-    _check_ip_budget(ip)
+    await _check_ip_budget(ip)
 
     job_id = str(uuid.uuid4())
 
@@ -733,9 +866,6 @@ async def agent_start(req: AgentStartRequest, request: Request):
     }
     agent_jobs[job_id] = job
 
-    # Persist to Redis
-    _update_job_redis(job_id, job)
-
     # Launch background task (will wait for semaphore if at capacity)
     task = asyncio.create_task(
         _run_agent_evaluation(job_id, req)
@@ -750,8 +880,8 @@ async def agent_status(job_id: str):
     """Poll agent evaluation progress."""
     job = agent_jobs.get(job_id)
     if not job:
-        # Try Redis
-        data = _get_job_redis(job_id)
+        # Try archived completed jobs
+        data = _get_archived_job(job_id)
         if not data:
             raise HTTPException(status_code=404, detail="Job not found")
         return data
@@ -780,7 +910,7 @@ async def agent_results(job_id: str):
     """Get final agent evaluation results."""
     job = agent_jobs.get(job_id)
     if not job:
-        data = _get_job_redis(job_id)
+        data = _get_archived_job(job_id)
         if not data:
             raise HTTPException(status_code=404, detail="Job not found")
         if data.get("status") != "complete":
@@ -869,14 +999,17 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
         logger.info("Job %s started (slots: %d/%d used, key pool[%d])", job_id,
                      MAX_CONCURRENT_JOBS - sem._value, MAX_CONCURRENT_JOBS, key_idx)
 
+        picon_turns = max(req.num_turns, 15)
+
         if req.mode == "external":
             run_kwargs = dict(
+                persona="",  # external agents have persona baked into their endpoint
                 name=req.name,
                 api_base=req.api_base,
-                num_turns=req.num_turns,
+                num_turns=picon_turns,
                 num_sessions=req.num_sessions,
                 do_eval=True,
-                output_dir="/tmp/picon_results",
+                output_dir=f"/tmp/picon_results/{job_id}",
                 **PICON_AGENT_MODELS,
             )
         else:
@@ -886,10 +1019,10 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
                 model=req.model or "openai/custom",
                 api_base=req.api_base or None,
                 api_key=req.api_key or None,
-                num_turns=req.num_turns,
+                num_turns=picon_turns,
                 num_sessions=req.num_sessions,
                 do_eval=True,
-                output_dir="/tmp/picon_results",
+                output_dir=f"/tmp/picon_results/{job_id}",
                 **PICON_AGENT_MODELS,
             )
 
@@ -928,7 +1061,7 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
                     _cancel_job_over_budget(job_id, "job", job_total, MAX_COST_PER_JOB)
                     return
                 # Per-IP daily cap
-                ip_total = _get_ip_daily_cost(ip)
+                ip_total = await asyncio.to_thread(_get_ip_daily_cost, ip)
                 if MAX_COST_PER_IP_DAILY > 0 and ip_total > MAX_COST_PER_IP_DAILY:
                     _cancel_job_over_budget(job_id, f"IP {ip} daily", ip_total, MAX_COST_PER_IP_DAILY)
                     return
@@ -937,19 +1070,21 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
                 result = payload
                 if result.success:
                     scores = result.eval_scores or {}
+                    logger.info("Agent eval_scores keys for %s: %s", req.name, list(scores.keys()))
+                    logger.info("Agent eval_scores for %s: %s", req.name, scores)
                     job["result"] = {
-                        "ic": scores.get("eval_internal_harmonic_mean"),
-                        "ec": scores.get("eval_external_wilson"),
-                        "rc": scores.get("eval_stability_intra_session"),
-                        "internal_responsiveness": scores.get("eval_internal_responsiveness"),
-                        "internal_consistency": scores.get("eval_internal_consistency"),
-                        "inter_session_stability": scores.get("eval_stability_inter_session"),
-                        "intra_session_stability": scores.get("eval_stability_intra_session"),
+                        "ic": scores.get("internal_harmonic_mean"),
+                        "ec": scores.get("external_ec"),
+                        "rc": scores.get("intra_session_stability"),
+                        "internal_responsiveness": scores.get("internal_responsiveness"),
+                        "internal_consistency": scores.get("internal_consistency"),
+                        "inter_session_stability": scores.get("inter_session_stability"),
+                        "intra_session_stability": scores.get("intra_session_stability"),
                     }
                     job["status"] = "complete"
                     job["is_complete"] = True
                     _add_to_leaderboard(req.name, req.model, job["result"], req.num_turns)
-                    logger.info("Agent eval complete for %s", req.name)
+                    logger.info("Agent eval complete for %s: %s", req.name, job["result"])
                 else:
                     job["status"] = "failed"
                     job["is_complete"] = True
@@ -983,9 +1118,11 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
         logger.info("Job %s released slot + key pool[%d] (slots: %d/%d used)", job_id,
                      key_idx, MAX_CONCURRENT_JOBS - sem._value, MAX_CONCURRENT_JOBS)
 
-    _update_job_redis(job_id, {
+    _archive_job(job_id, {
+        "session_id": job_id,
         "status": job["status"],
         "name": job["name"],
+        "model": job.get("model", ""),
         "is_complete": True,
         "scores": job.get("result"),
         "error": job.get("error"),
@@ -999,31 +1136,39 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
 
 @app.get("/api/leaderboard")
 async def get_leaderboard():
-    """Return community leaderboard entries from Redis."""
+    """Return community leaderboard entries from SQLite."""
+    def _fetch():
+        with _sqlite_lock:
+            conn = sqlite3.connect(SQLITE_PATH)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT name, model, type, arch, turns, ic, ec, rc, timestamp "
+                "FROM leaderboard ORDER BY id ASC"
+            ).fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
     try:
-        r = get_redis()
-        raw = r.lrange("leaderboard:community", 0, -1)
-        return {"entries": [json.loads(e) for e in raw]}
-    except Exception:
+        entries = await asyncio.to_thread(_fetch)
+        return {"entries": entries}
+    except Exception as e:
+        logger.warning("get_leaderboard failed: %s", e)
         return {"entries": []}
 
 
 def _add_to_leaderboard(name: str, model: str, scores: dict, turns: int = 50):
-    """Add a completed evaluation to the community leaderboard in Redis."""
+    """Add a completed evaluation to the community leaderboard in SQLite."""
     try:
-        r = get_redis()
-        entry = {
-            "name": name,
-            "model": model,
-            "type": "community",
-            "arch": "Community",
-            "turns": turns,
-            "ic": scores.get("ic") or 0,
-            "ec": scores.get("ec") or 0,
-            "rc": scores.get("rc") or 0,
-            "timestamp": time.time(),
-        }
-        r.rpush("leaderboard:community", json.dumps(entry))
+        with _sqlite_lock:
+            conn = sqlite3.connect(SQLITE_PATH)
+            conn.execute(
+                "INSERT INTO leaderboard (name, model, type, arch, turns, ic, ec, rc, timestamp) "
+                "VALUES (?, ?, 'community', 'Community', ?, ?, ?, ?, ?)",
+                (name, model, turns,
+                 scores.get("ic") or 0, scores.get("ec") or 0, scores.get("rc") or 0,
+                 time.time()),
+            )
+            conn.commit()
+            conn.close()
     except Exception as e:
         logger.warning("Failed to add leaderboard entry: %s", e)
 
@@ -1031,35 +1176,28 @@ def _add_to_leaderboard(name: str, model: str, scores: dict, turns: int = 50):
 @app.delete("/api/leaderboard/latest")
 async def delete_latest_leaderboard():
     """Remove the most recent community leaderboard entry."""
+    def _pop():
+        with _sqlite_lock:
+            conn = sqlite3.connect(SQLITE_PATH)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT id, name, model, type, arch, turns, ic, ec, rc, timestamp "
+                "FROM leaderboard ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if row:
+                conn.execute("DELETE FROM leaderboard WHERE id = ?", (row["id"],))
+                conn.commit()
+                conn.close()
+                return dict(row)
+            conn.close()
+            return None
     try:
-        r = get_redis()
-        removed = r.rpop("leaderboard:community")
+        removed = await asyncio.to_thread(_pop)
         if removed:
-            return {"removed": json.loads(removed)}
+            return {"removed": removed}
         return {"removed": None, "message": "Leaderboard is empty"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-# ===========================================================================
-# Redis helpers
-# ===========================================================================
-
-def _update_job_redis(job_id: str, data: dict):
-    try:
-        r = get_redis()
-        r.setex(f"job:{job_id}", JOB_TTL, json.dumps(data))
-    except Exception:
-        pass
-
-
-def _get_job_redis(job_id: str) -> Optional[dict]:
-    try:
-        r = get_redis()
-        raw = r.get(f"job:{job_id}")
-        return json.loads(raw) if raw else None
-    except Exception:
-        return None
 
 
 # ===========================================================================
@@ -1069,25 +1207,29 @@ def _get_job_redis(job_id: str) -> Optional[dict]:
 @app.get("/api/usage")
 async def get_usage():
     """Return daily cost totals broken down by day and by IP."""
-    daily_global: Dict[str, float] = {}
-    daily_by_ip: Dict[str, Dict[str, float]] = {}
+    def _fetch_usage():
+        with _sqlite_lock:
+            conn = sqlite3.connect(SQLITE_PATH)
+            # Daily global totals
+            _daily = {}
+            for row in conn.execute(
+                "SELECT date, ROUND(SUM(cost), 5) FROM cost_log GROUP BY date ORDER BY date"
+            ):
+                _daily[row[0]] = row[1]
+            # Daily by-IP totals
+            _by_ip: Dict[str, Dict[str, float]] = {}
+            for row in conn.execute(
+                "SELECT ip, date, ROUND(SUM(cost), 5) FROM cost_log GROUP BY ip, date ORDER BY date"
+            ):
+                _by_ip.setdefault(row[0], {})[row[1]] = row[2]
+            conn.close()
+            return _daily, _by_ip
 
     try:
-        r = get_redis()
-        for key in r.keys("usage:daily:*"):
-            val = r.get(key)
-            if val:
-                daily_global[key.replace("usage:daily:", "")] = round(float(val), 5)
-        for key in r.keys("usage:ip:*"):
-            val = r.get(key)
-            if val:
-                # key format: usage:ip:{ip}:{date}
-                parts = key.split(":", 3)  # ["usage", "ip", ip, date]
-                if len(parts) == 4:
-                    ip, date = parts[2], parts[3]
-                    daily_by_ip.setdefault(ip, {})[date] = round(float(val), 5)
-    except Exception:
-        pass
+        daily_global, daily_by_ip = await asyncio.to_thread(_fetch_usage)
+    except Exception as e:
+        logger.warning("get_usage failed: %s", e)
+        daily_global, daily_by_ip = {}, {}
 
     active = {
         jid: {
@@ -1107,6 +1249,33 @@ async def get_usage():
         "daily_by_ip_usd": daily_by_ip,
         "active_jobs": active,
     }
+
+
+@app.get("/api/admin/sessions")
+async def admin_sessions():
+    """Dump all in-memory experience sessions and agent jobs with their results."""
+    exp = []
+    for sid, s in sessions.items():
+        exp.append({
+            "session_id": sid,
+            "name": s.get("name"),
+            "status": s.get("status"),
+            "turn_count": s.get("turn_count", 0),
+            "result": s.get("result"),
+            "error": s.get("error"),
+        })
+    agent = []
+    for jid, j in agent_jobs.items():
+        agent.append({
+            "job_id": jid,
+            "name": j.get("name"),
+            "model": j.get("model"),
+            "status": j.get("status"),
+            "is_complete": j.get("is_complete"),
+            "result": j.get("result"),
+            "error": j.get("error"),
+        })
+    return {"experience_sessions": exp, "agent_jobs": agent}
 
 
 # ===========================================================================
@@ -1184,13 +1353,6 @@ async def admin_cleanup():
 
 @app.get("/api/health")
 async def health():
-    redis_ok = False
-    try:
-        get_redis().ping()
-        redis_ok = True
-    except Exception:
-        pass
-
     picon_ok = False
     picon_err = None
     try:
@@ -1198,6 +1360,15 @@ async def health():
         picon_ok = True
     except Exception as e:
         picon_err = str(e)
+
+    db_ok = False
+    try:
+        conn = sqlite3.connect(SQLITE_PATH)
+        conn.execute("SELECT 1")
+        conn.close()
+        db_ok = True
+    except Exception:
+        pass
 
     env_keys = {
         "GEMINI_API_KEY": bool(os.getenv("GEMINI_API_KEY")),
@@ -1208,8 +1379,23 @@ async def health():
 
     return {
         "status": "ok",
-        "redis": redis_ok,
+        "sqlite": db_ok,
         "picon": picon_ok,
         "picon_error": picon_err,
         "env_keys": env_keys,
     }
+
+
+# ===========================================================================
+# Static file serving (for local / Docker testing — not used on Railway)
+# ===========================================================================
+_static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(_static_dir):
+    from fastapi.staticfiles import StaticFiles
+    from fastapi.responses import FileResponse
+
+    @app.get("/")
+    async def serve_index():
+        return FileResponse(os.path.join(_static_dir, "index.html"))
+
+    app.mount("/assets", StaticFiles(directory=os.path.join(_static_dir, "assets")), name="assets")
