@@ -19,6 +19,7 @@ import queue
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Dict, Optional
 
@@ -42,7 +43,11 @@ redis_client: Optional[redis.Redis] = None
 # ---------------------------------------------------------------------------
 # Concurrency control
 # ---------------------------------------------------------------------------
-MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "15"))
+MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "60"))
+# Max time (seconds) any single job can hold a slot before being forcefully terminated
+JOB_TIMEOUT = int(os.getenv("JOB_TIMEOUT", "1800"))  # 30 minutes
+# Experience Mode: if browser stops polling for this many seconds, consider abandoned
+EXPERIENCE_ABANDON_TIMEOUT = int(os.getenv("EXPERIENCE_ABANDON_TIMEOUT", "120"))  # 2 minutes
 _job_semaphore: Optional[asyncio.Semaphore] = None
 _queued_job_ids: list = []  # ordered list of waiting job IDs for position tracking
 _queue_lock: Optional[asyncio.Lock] = None
@@ -230,6 +235,10 @@ def get_redis() -> redis.Redis:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Expand default thread pool so Experience Mode bridge doesn't starve
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=200))
+
     try:
         r = get_redis()
         r.ping()
@@ -331,12 +340,23 @@ async def bridge_chat_completions(session_id: str, request: Request):
     })
     session["turn_count"] = session.get("turn_count", 0) + 1
 
-    # Wait for the human to respond (blocking, but we're in a thread via run_in_executor)
-    try:
-        human_response = await asyncio.to_thread(
-            session["response_queue"].get, timeout=600  # 10 min timeout per question
-        )
-    except queue.Empty:
+    # Wait for the human to respond, checking for abandonment periodically
+    human_response = None
+    deadline = time.time() + 120  # max 2 min total wait per question
+    while time.time() < deadline:
+        # Check if session was abandoned (browser stopped polling)
+        last_poll = session.get("last_poll_time", time.time())
+        if time.time() - last_poll > EXPERIENCE_ABANDON_TIMEOUT:
+            logger.warning("Experience %s abandoned (no poll for %ds)", session_id, EXPERIENCE_ABANDON_TIMEOUT)
+            raise HTTPException(status_code=410, detail="Session abandoned")
+        try:
+            human_response = await asyncio.to_thread(
+                session["response_queue"].get, timeout=5  # check every 5s
+            )
+            break
+        except queue.Empty:
+            continue
+    if human_response is None:
         human_response = "I'd rather not answer that."
 
     # Return as OpenAI chat completion format
@@ -389,6 +409,8 @@ async def experience_start(req: ExperienceStartRequest, request: Request):
         "turn_count": -1,
         "client_ip": ip,
         "key_idx": -1,
+        "last_poll_time": time.time(),
+        "started_at": time.time(),
     }
     sessions[session_id] = session
 
@@ -438,6 +460,7 @@ async def experience_status(session_id: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    session["last_poll_time"] = time.time()
     queue_position = None
     if session["status"] == "queued" and session_id in _queued_job_ids:
         queue_position = _queued_job_ids.index(session_id) + 1
@@ -473,6 +496,8 @@ async def experience_status(session_id: str):
 async def experience_respond(req: ExperienceRespondRequest):
     """Human sends a response; forward it to picon via the bridge queue."""
     session = sessions.get(req.session_id)
+    if session:
+        session["last_poll_time"] = time.time()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -600,7 +625,28 @@ async def _run_experience_session(
         proc.start()
 
         # Drain results from the subprocess
+        job_start = session.get("started_at", time.time())
         while proc.is_alive() or not result_queue.empty():
+            # Check job timeout
+            if time.time() - job_start > JOB_TIMEOUT:
+                logger.warning("Experience %s timed out after %ds", session_id, JOB_TIMEOUT)
+                if proc.is_alive():
+                    proc.terminate()
+                session["status"] = "error"
+                session["error"] = "Session timed out"
+                session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
+                break
+            # Check browser abandon
+            last_poll = session.get("last_poll_time", time.time())
+            if session["status"] == "running" and time.time() - last_poll > EXPERIENCE_ABANDON_TIMEOUT:
+                logger.warning("Experience %s abandoned (no browser activity for %ds)", session_id, EXPERIENCE_ABANDON_TIMEOUT)
+                if proc.is_alive():
+                    proc.terminate()
+                session["status"] = "error"
+                session["error"] = "Session abandoned"
+                session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
+                break
+
             try:
                 msg_type, payload = await asyncio.to_thread(result_queue.get, timeout=1)
             except queue.Empty:
@@ -683,6 +729,7 @@ async def agent_start(req: AgentStartRequest, request: Request):
         "result": None,
         "error": None,
         "client_ip": ip,
+        "started_at": time.time(),
     }
     agent_jobs[job_id] = job
 
@@ -856,8 +903,18 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
         proc.start()
 
         ip = job.get("client_ip", "unknown")
+        job_start = job.get("started_at", time.time())
 
         while proc.is_alive() or not result_queue.empty():
+            # Check job timeout
+            if time.time() - job_start > JOB_TIMEOUT:
+                logger.warning("Job %s timed out after %ds", job_id, JOB_TIMEOUT)
+                if proc.is_alive():
+                    proc.terminate()
+                job["status"] = "error"
+                job["is_complete"] = True
+                job["error"] = f"Job timed out after {JOB_TIMEOUT}s"
+                break
             try:
                 msg_type, payload = await asyncio.to_thread(result_queue.get, timeout=1)
             except queue.Empty:
@@ -1070,6 +1127,58 @@ async def queue_info():
         "available_slots": sem._value,
         "key_pool_size": len(_openai_key_pool),
         "key_usage": key_usage,
+    }
+
+
+@app.post("/api/admin/cleanup")
+async def admin_cleanup():
+    """Force-cancel stale sessions/jobs and release their slots.
+
+    Cancels: Experience sessions with no browser poll for EXPERIENCE_ABANDON_TIMEOUT,
+    and any job older than JOB_TIMEOUT.
+    """
+    cleaned = {"experience": [], "agent": []}
+    now = time.time()
+
+    # Clean stale experience sessions
+    for sid, session in list(sessions.items()):
+        if session.get("status") in ("complete", "error", "cancelled"):
+            continue
+        last_poll = session.get("last_poll_time", now)
+        started = session.get("started_at", now)
+        abandoned = now - last_poll > EXPERIENCE_ABANDON_TIMEOUT
+        timed_out = now - started > JOB_TIMEOUT
+        if abandoned or timed_out:
+            task = session.get("task")
+            if task and not task.done():
+                task.cancel()
+            proc = session.get("process")
+            if proc and proc.is_alive():
+                proc.terminate()
+            session["status"] = "cancelled"
+            session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
+            cleaned["experience"].append(sid[:8])
+
+    # Clean stale agent jobs
+    for jid, job in list(agent_jobs.items()):
+        if job.get("is_complete"):
+            continue
+        started = job.get("started_at", now)
+        if now - started > JOB_TIMEOUT:
+            task = job.get("task")
+            if task and not task.done():
+                task.cancel()
+            proc = job.get("process")
+            if proc and proc.is_alive():
+                proc.terminate()
+            job["status"] = "cancelled"
+            job["is_complete"] = True
+            cleaned["agent"].append(jid[:8])
+
+    sem = _get_semaphore()
+    return {
+        "cleaned": cleaned,
+        "slots_after": {"running": MAX_CONCURRENT_JOBS - sem._value, "available": sem._value},
     }
 
 

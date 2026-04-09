@@ -161,12 +161,13 @@
 
       if (data.status === 'queued') {
         // Server is at capacity — poll until a slot opens
-        addMessage(expMessages, 'info', 'Server is busy. You are in the queue — please wait...');
-        var firstQuestion = await pollExperienceQueue(expSessionId, expMessages);
+        var queueMsg = addMessage(expMessages, 'info', 'Server is busy. You are in the queue — please wait...');
+        var firstQuestion = await pollExperienceQueue(expSessionId, expMessages, queueMsg);
         if (!firstQuestion) {
           addMessage(expMessages, 'info', 'Failed to start interview. Please try again later.');
           return;
         }
+        if (queueMsg) queueMsg.remove();
         addMessage(expMessages, 'system', firstQuestion);
       } else {
         addMessage(expMessages, 'system', data.first_question);
@@ -178,9 +179,8 @@
     }
   });
 
-  async function pollExperienceQueue(sessionId, messagesEl) {
+  async function pollExperienceQueue(sessionId, messagesEl, queueMsgEl) {
     // Poll /api/experience/status until we get the first question or an error.
-    var lastPos = null;
     while (true) {
       await new Promise(function (r) { setTimeout(r, 2000); });
       try {
@@ -188,13 +188,12 @@
         if (!res.ok) return null;
         var data = await res.json();
 
-        // Update queue position message
-        if (data.status === 'queued' && data.queue_position) {
-          var posMsg = 'Queue position: ' + data.queue_position + ' — please wait...';
-          if (data.queue_position !== lastPos) {
-            addMessage(messagesEl, 'info', posMsg);
-            lastPos = data.queue_position;
-          }
+        // Update queue position message in-place
+        if (data.status === 'queued' && queueMsgEl) {
+          var posText = data.queue_position
+            ? 'Queue position: ' + data.queue_position + ' of ' + (data.max_concurrent || '?') + ' slots — please wait...'
+            : 'Server is busy. You are in the queue — please wait...';
+          queueMsgEl.textContent = posText;
         }
 
         if (data.status === 'error') return null;
