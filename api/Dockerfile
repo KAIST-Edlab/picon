@@ -19,8 +19,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
 # Copy application
 COPY api/main.py .
 
-# Copy static frontend (for local/Docker testing; not used on Railway)
-COPY test-frontend/index.html static/index.html
+# Copy static frontend assets (optional — only needed for local/Docker testing)
 COPY assets/ static/assets/
 
 # Expose port
