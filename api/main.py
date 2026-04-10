@@ -14,6 +14,7 @@ import asyncio
 import logging
 import multiprocessing
 import os
+import sys
 import queue
 import sqlite3
 import threading
@@ -179,20 +180,71 @@ _cost_lock = threading.Lock()
 job_costs: Dict[str, float] = {}  # job_id -> cumulative USD
 
 
+class _QueueLogStream:
+    """File-like object that forwards writes to a multiprocessing.Queue as ('log', line) tuples."""
+
+    def __init__(self, q: multiprocessing.Queue):
+        self._q = q
+        self._buf = ""
+
+    def write(self, s: str):
+        if not s:
+            return
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line.strip():
+                try:
+                    self._q.put(("log", line))
+                except Exception:
+                    pass
+
+    def flush(self):
+        if self._buf.strip():
+            try:
+                self._q.put(("log", self._buf))
+            except Exception:
+                pass
+        self._buf = ""
+
+
 def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict, openai_key: str = ""):
     """
     Runs inside a subprocess. Sets the assigned OpenAI key in the subprocess
     environment, then calls picon.run(). Used by both Agent Test and Experience modes.
+
+    Captures stdout, stderr, and root logger output and forwards them as
+    ('log', line) messages so the parent can expose them via /api/agent/logs.
     """
     if openai_key:
         os.environ["OPENAI_API_KEY"] = openai_key
+
+    # Install log capture BEFORE importing picon so its module-level logger setup is intercepted.
+    import logging as _logging
+    stream = _QueueLogStream(result_queue)
+    sys.stdout = stream
+    sys.stderr = stream
+    root = _logging.getLogger()
+    handler = _logging.StreamHandler(stream)
+    handler.setFormatter(_logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S"))
+    root.addHandler(handler)
+    root.setLevel(_logging.INFO)
+
     import picon
 
     try:
         result = picon.run(**run_kwargs)
         result_queue.put(("result", result))
     except Exception as e:
+        import traceback
+        result_queue.put(("log", f"ERROR: {e}"))
+        result_queue.put(("log", traceback.format_exc()))
         result_queue.put(("error", str(e)))
+    finally:
+        try:
+            stream.flush()
+        except Exception:
+            pass
 
 
 def _client_ip(request: Request) -> str:
@@ -783,6 +835,10 @@ async def _run_experience_session(
             except queue.Empty:
                 continue
 
+            if msg_type == "log":
+                # Experience mode shows the chat UI instead of a log stream; drop picon logs.
+                continue
+
             if msg_type == "result":
                 result = payload
                 scores = result.eval_scores or {}
@@ -1053,7 +1109,13 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
             except queue.Empty:
                 continue
 
-            if msg_type == "cost":
+            if msg_type == "log":
+                job["logs"].append(payload)
+                if len(job["logs"]) > 5000:
+                    # Trim to bound memory for very long runs
+                    job["logs"] = job["logs"][-4000:]
+
+            elif msg_type == "cost":
                 job_total = _add_job_cost(job_id, payload)
                 logger.debug("Job %s: +$%.5f (total $%.5f)", job_id, payload, job_total)
                 # Per-job cap
