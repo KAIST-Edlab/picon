@@ -97,8 +97,13 @@ def _init_db():
 # Concurrency control
 # ---------------------------------------------------------------------------
 MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "60"))
-# Max time (seconds) any single job can hold a slot before being forcefully terminated
-JOB_TIMEOUT = int(os.getenv("JOB_TIMEOUT", "1800"))  # 30 minutes
+# Soft deadline: at this point we log a warning and STOP counting fresh cost toward
+# the user, but we keep reading messages from the subprocess so an almost-finished
+# picon.run() can still deliver its result. Crucial for slow user backends (e.g. a
+# single Ollama instance serving 4+ concurrent interrogation sessions).
+JOB_TIMEOUT = int(os.getenv("JOB_TIMEOUT", "3600"))  # 60 minutes soft deadline
+# Hard deadline: after this, we really terminate the subprocess. Must be >= JOB_TIMEOUT.
+JOB_HARD_TIMEOUT = int(os.getenv("JOB_HARD_TIMEOUT", str(JOB_TIMEOUT + 1800)))  # +30 min grace
 # Experience Mode: if browser stops polling for this many seconds, consider abandoned
 EXPERIENCE_ABANDON_TIMEOUT = int(os.getenv("EXPERIENCE_ABANDON_TIMEOUT", "120"))  # 2 minutes
 _job_semaphore: Optional[asyncio.Semaphore] = None
@@ -810,9 +815,10 @@ async def _run_experience_session(
         # Drain results from the subprocess
         job_start = session.get("started_at", time.time())
         while proc.is_alive() or not result_queue.empty():
-            # Check job timeout
-            if time.time() - job_start > JOB_TIMEOUT:
-                logger.warning("Experience %s timed out after %ds", session_id, JOB_TIMEOUT)
+            # Hard job timeout — only terminate after the hard deadline. We let the
+            # subprocess keep running past the soft deadline in case it's almost done.
+            if time.time() - job_start > JOB_HARD_TIMEOUT:
+                logger.warning("Experience %s HARD timeout after %ds", session_id, JOB_HARD_TIMEOUT)
                 if proc.is_alive():
                     proc.terminate()
                 session["status"] = "error"
@@ -1093,17 +1099,32 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
 
         ip = job.get("client_ip", "unknown")
         job_start = job.get("started_at", time.time())
+        soft_timeout_warned = False
 
         while proc.is_alive() or not result_queue.empty():
-            # Check job timeout
-            if time.time() - job_start > JOB_TIMEOUT:
-                logger.warning("Job %s timed out after %ds", job_id, JOB_TIMEOUT)
+            elapsed = time.time() - job_start
+            # Hard deadline: really kill the subprocess and give up.
+            if elapsed > JOB_HARD_TIMEOUT:
+                logger.warning("Job %s HARD timeout after %ds — terminating", job_id, int(elapsed))
                 if proc.is_alive():
                     proc.terminate()
                 job["status"] = "error"
                 job["is_complete"] = True
-                job["error"] = f"Job timed out after {JOB_TIMEOUT}s"
+                job["error"] = f"Job timed out after {JOB_HARD_TIMEOUT}s"
                 break
+            # Soft deadline: warn once, keep reading. Slow user backends (e.g. Ollama
+            # under concurrent load) routinely go past this point and still deliver
+            # a valid result — we must not throw that work away.
+            if elapsed > JOB_TIMEOUT and not soft_timeout_warned:
+                logger.warning(
+                    "Job %s past soft deadline (%ds) — letting subprocess finish up to %ds",
+                    job_id, JOB_TIMEOUT, JOB_HARD_TIMEOUT,
+                )
+                job["logs"].append(
+                    f"[server] This job has been running for {int(elapsed)}s. Still waiting "
+                    f"for the subprocess to finish (grace period until {JOB_HARD_TIMEOUT}s)."
+                )
+                soft_timeout_warned = True
             try:
                 msg_type, payload = await asyncio.to_thread(result_queue.get, timeout=1)
             except queue.Empty:
@@ -1145,7 +1166,10 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
                     }
                     job["status"] = "complete"
                     job["is_complete"] = True
-                    _add_to_leaderboard(req.name, req.model, job["result"], req.num_turns)
+                    # Result is kept private to the session. The frontend stores
+                    # completed runs in per-browser localStorage so the user sees
+                    # their own history without anyone else's. Public leaderboard
+                    # submission requires an explicit POST to /api/leaderboard/submit.
                     logger.info("Agent eval complete for %s: %s", req.name, job["result"])
                 else:
                     job["status"] = "failed"
@@ -1233,6 +1257,30 @@ def _add_to_leaderboard(name: str, model: str, scores: dict, turns: int = 50):
             conn.close()
     except Exception as e:
         logger.warning("Failed to add leaderboard entry: %s", e)
+
+
+@app.post("/api/leaderboard/submit")
+async def submit_to_leaderboard(job_id: str):
+    """
+    Explicitly publish a completed agent job's result to the public leaderboard.
+
+    Agent results are private to the session by default. The user can choose to
+    publish by calling this endpoint with their own job_id after results are in.
+    """
+    job = agent_jobs.get(job_id)
+    if not job:
+        # Also look up from completed_jobs table (result archive)
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.get("is_complete") or job.get("status") != "complete":
+        raise HTTPException(status_code=400, detail="Job is not in 'complete' state")
+    result = job.get("result") or {}
+    if not result:
+        raise HTTPException(status_code=400, detail="No result to publish")
+    name = job.get("name") or "Agent"
+    model = job.get("model") or ""
+    turns = job.get("total_turns") or 50
+    await asyncio.to_thread(_add_to_leaderboard, name, model, result, turns)
+    return {"status": "published", "name": name}
 
 
 @app.delete("/api/leaderboard/latest")
@@ -1366,7 +1414,8 @@ async def admin_cleanup():
     """Force-cancel stale sessions/jobs and release their slots.
 
     Cancels: Experience sessions with no browser poll for EXPERIENCE_ABANDON_TIMEOUT,
-    and any job older than JOB_TIMEOUT.
+    and any job older than JOB_HARD_TIMEOUT (the soft deadline is not grounds for
+    forcible cancellation — the subprocess may still be delivering useful work).
     """
     cleaned = {"experience": [], "agent": []}
     now = time.time()
@@ -1378,7 +1427,7 @@ async def admin_cleanup():
         last_poll = session.get("last_poll_time", now)
         started = session.get("started_at", now)
         abandoned = now - last_poll > EXPERIENCE_ABANDON_TIMEOUT
-        timed_out = now - started > JOB_TIMEOUT
+        timed_out = now - started > JOB_HARD_TIMEOUT
         if abandoned or timed_out:
             task = session.get("task")
             if task and not task.done():
@@ -1395,7 +1444,7 @@ async def admin_cleanup():
         if job.get("is_complete"):
             continue
         started = job.get("started_at", now)
-        if now - started > JOB_TIMEOUT:
+        if now - started > JOB_HARD_TIMEOUT:
             task = job.get("task")
             if task and not task.done():
                 task.cancel()

@@ -30,26 +30,34 @@
 
   BASELINES.forEach(function (d) { d.area = computeArea(d); });
 
-  // Community submissions (loaded from API; localStorage as fallback)
-  var communityEntries = [];
+  // Abandon the old merged cache key — stale auto-inserted entries lived here.
+  try { localStorage.removeItem('picon_community'); } catch (e) { /* ignore */ }
+
+  // myLocalRuns:   this browser's own completed runs (private, localStorage-backed)
+  // publishedEntries: entries explicitly published to the public leaderboard via /api/leaderboard/submit
+  var LOCAL_RUNS_KEY = 'picon_my_runs';
+  var myLocalRuns = [];
   try {
-    communityEntries = JSON.parse(localStorage.getItem('picon_community') || '[]');
+    myLocalRuns = JSON.parse(localStorage.getItem(LOCAL_RUNS_KEY) || '[]');
   } catch (e) { /* ignore */ }
+  var publishedEntries = [];
+
+  function saveLocalRuns() {
+    try { localStorage.setItem(LOCAL_RUNS_KEY, JSON.stringify(myLocalRuns)); } catch (e) { /* ignore */ }
+  }
 
   function fetchCommunityEntries() {
     if (!API_BASE) return;
     fetch(API_BASE + '/api/leaderboard')
       .then(function (res) { return res.json(); })
       .then(function (data) {
-        if (data.entries && data.entries.length > 0) {
-          communityEntries = data.entries.map(function (e) {
-            e.area = computeArea(e);
-            return e;
-          });
-          renderLeaderboard();
-        }
+        publishedEntries = (data.entries || []).map(function (e) {
+          e.area = computeArea(e);
+          return e;
+        });
+        renderLeaderboard();
       })
-      .catch(function () { /* keep localStorage entries */ });
+      .catch(function () { /* network issue — leave publishedEntries as-is */ });
   }
 
   // ===== Tab switching =====
@@ -415,13 +423,40 @@
   }
 
   async function pollAgentProgress(sessionId) {
+    // Transient failures (Railway 5xx, network blips) MUST NOT kill the poller.
+    // Under concurrent load, a single failed tick used to freeze the UI forever
+    // even though the backend job kept running and completed successfully.
+    // We now tolerate up to ~30s of consecutive failures before giving up, and
+    // a successful tick resets the counter.
+    var consecutiveFailures = 0;
+    var MAX_CONSECUTIVE_FAILURES = 10; // ~30s at 3s interval
+    var stopped = false;
+
+    function stop() {
+      stopped = true;
+      clearInterval(interval);
+    }
+
     var interval = setInterval(async function () {
+      if (stopped) return;
       try {
-        // Fetch logs and status in parallel
+        // Logs are best-effort (its own try/catch); failures here are swallowed.
         await fetchAgentLogs(sessionId);
 
         var res = await fetch(API_BASE + '/api/agent/status/' + sessionId);
-        if (!res.ok) { clearInterval(interval); return; }
+        if (!res.ok) {
+          consecutiveFailures++;
+          if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+            stop();
+            appendTerminal('\nNetwork issue — status endpoint returned ' + res.status +
+              ' for too long. The evaluation may still be running on the server; ' +
+              'refresh and check the leaderboard in a few minutes.\n');
+            agentProgress.textContent = 'Connection lost';
+          }
+          return;
+        }
+        consecutiveFailures = 0;
+
         var data = await res.json();
 
         if (data.status === 'queued') {
@@ -433,7 +468,7 @@
         }
 
         if (data.is_complete) {
-          clearInterval(interval);
+          stop();
 
           // Fetch final logs
           await fetchAgentLogs(sessionId);
@@ -447,10 +482,20 @@
           agentProgress.textContent = 'Complete';
           appendTerminal('\n--- Evaluation complete ---\n');
 
-          // Fetch results
-          var rRes = await fetch(API_BASE + '/api/agent/results/' + sessionId);
-          if (rRes.ok) {
-            var results = await rRes.json();
+          // Fetch results — retry a few times in case of transient 5xx at the tail
+          var results = null;
+          for (var attempt = 0; attempt < 5; attempt++) {
+            try {
+              var rRes = await fetch(API_BASE + '/api/agent/results/' + sessionId);
+              if (rRes.ok) {
+                results = await rRes.json();
+                break;
+              }
+            } catch (_e) { /* retry */ }
+            await new Promise(function (r) { setTimeout(r, 2000); });
+          }
+
+          if (results) {
             document.getElementById('agent-log').style.display = 'none';
             document.getElementById('agent-results').style.display = 'block';
             renderScoreGrid(
@@ -458,7 +503,7 @@
               results.scores || {}
             );
 
-            // Add to community leaderboard
+            // Add to this browser's private history (not published to anyone else).
             var entry = {
               name: results.name || 'Agent',
               type: 'community',
@@ -469,14 +514,24 @@
               rc: results.scores.rc || 0,
             };
             entry.area = computeArea(entry);
-            communityEntries.push(entry);
-            localStorage.setItem('picon_community', JSON.stringify(communityEntries));
+            myLocalRuns.push(entry);
+            saveLocalRuns();
             renderLeaderboard();
+          } else {
+            appendTerminal('\nCould not fetch final results after several retries. ' +
+              'The evaluation completed on the server — try refreshing.\n');
+            agentProgress.textContent = 'Results unavailable';
           }
         }
       } catch (err) {
-        clearInterval(interval);
-        appendTerminal('\nERROR: ' + err.message + '\n');
+        // Network blip, JSON parse error, etc. Count it but do not give up.
+        consecutiveFailures++;
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          stop();
+          appendTerminal('\nLost connection to server (' + err.message + '). ' +
+            'The evaluation may still be running on the server; refresh in a few minutes.\n');
+          agentProgress.textContent = 'Connection lost';
+        }
       }
     }, 3000);
   }
@@ -520,7 +575,7 @@
   var currentTurnsFilter = 'all';
 
   function getAllEntries() {
-    return BASELINES.concat(communityEntries);
+    return BASELINES.concat(publishedEntries).concat(myLocalRuns);
   }
 
   function renderLeaderboard() {
