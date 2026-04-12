@@ -26,6 +26,16 @@ layout_js: /assets/js/demo.js
       all three dimensions.
     </div>
 
+    <div class="turn-info-box">
+      <strong>How turns work:</strong> For example, selecting <em>30 turns</em> means:
+      <ul>
+        <li><strong>10 warm-up questions</strong> &mdash; predefined get-to-know questions</li>
+        <li><strong>20+ interrogation questions</strong> &mdash; adaptive follow-ups &amp; fact-checking confirmations</li>
+        <li><strong>10 retest questions</strong> &mdash; repeats of warm-up to check consistency</li>
+      </ul>
+      The "+" is because PICon may ask additional confirmation questions when verifying claims via web search.
+    </div>
+
     <!-- Name entry -->
     <div id="exp-start" class="agent-form">
       <div class="form-row">
@@ -34,7 +44,7 @@ layout_js: /assets/js/demo.js
           <input type="text" id="exp-name" placeholder="Enter your name to begin">
         </div>
         <div class="form-group" style="flex:1;">
-          <label for="exp-turns">Turns <span class="label-hint">(includes 10 warm-up + follow-up questions)</span></label>
+          <label for="exp-turns">Turns</label>
           <select id="exp-turns">
             <option value="30">30 turns (quick)</option>
             <option value="50" selected>50 turns (standard)</option>
@@ -103,7 +113,7 @@ layout_js: /assets/js/demo.js
       </div>
       <div class="form-row">
         <div class="form-group" style="flex:1;">
-          <label for="ext-agent-turns">Interrogation Turns <span class="label-hint">(includes 10 warm-up + follow-up questions)</span></label>
+          <label for="ext-agent-turns">Interrogation Turns</label>
           <select id="ext-agent-turns">
             <option value="30">30 turns (quick)</option>
             <option value="50" selected>50 turns (standard)</option>
@@ -144,7 +154,7 @@ layout_js: /assets/js/demo.js
       </div>
       <div class="form-row">
         <div class="form-group" style="flex:1;">
-          <label for="quick-agent-turns">Interrogation Turns <span class="label-hint">(includes 10 warm-up + follow-up questions)</span></label>
+          <label for="quick-agent-turns">Interrogation Turns</label>
           <select id="quick-agent-turns">
             <option value="30">30 turns (quick)</option>
             <option value="50" selected>50 turns (standard)</option>

@@ -519,6 +519,24 @@ th { background: var(--color-bg-alt); font-weight: 600; }
   font-size: 0.9375rem;
 }
 
+.turn-info-box {
+  margin-bottom: 1.25rem;
+  padding: 0.875rem 1.25rem;
+  background: var(--color-bg-alt);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+.turn-info-box ul {
+  margin: 0.4rem 0 0.25rem 1.25rem;
+  padding: 0;
+}
+.turn-info-box li {
+  margin-bottom: 0.15rem;
+}
+
 /* Chat UI */
 .chat-container {
   border: 1px solid var(--color-border);

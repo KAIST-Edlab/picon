@@ -575,6 +575,7 @@ async def experience_start(req: ExperienceStartRequest, request: Request):
 
     # Subtract pre-screening turns so picon gets pure interview turn count
     picon_turns = max(req.num_turns, 15)
+    session["picon_turns"] = picon_turns
 
     # Launch background task (will wait for semaphore if at capacity)
     task = asyncio.create_task(
@@ -706,7 +707,21 @@ async def experience_respond(req: ExperienceRespondRequest):
 
     # next_q["turn"]: -1=instruction, 0=first question, 1=second, ...
     # Display as 1-based, skipping instruction
-    session["progress"]["current"] = next_q.get("turn", 0) + 1
+    turn = next_q.get("turn", 0)
+    session["progress"]["current"] = turn + 1
+
+    # Update phase based on turn count vs picon_turns (stored at session start).
+    # Warmup (predefined get-to-know): turns 0–9
+    # Main interrogation: turns 10 – (picon_turns-1)
+    # Repeat (retest): turns >= picon_turns
+    # Confirmation questions are interleaved but we estimate phase from the count.
+    picon_turns = session.get("picon_turns", 30)
+    if turn < 10:
+        session["progress"]["phase"] = "predefined"
+    elif turn < picon_turns:
+        session["progress"]["phase"] = "main"
+    else:
+        session["progress"]["phase"] = "repeat"
 
     return {
         "next_question": next_q["question"],
