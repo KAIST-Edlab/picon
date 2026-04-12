@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>PICon Frontend Load Test (Popups)</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --border: #30363d;
+      --text: #c9d1d9;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --ok: #3fb950;
+      --warn: #d29922;
+      --err: #f85149;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 14px;
+    }
+    h1 { margin: 0 0 10px; font-size: 18px; }
+    h2 { margin: 0 0 6px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px 14px;
+      margin-bottom: 12px;
+    }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .row label { font-size: 11px; color: var(--muted); display: flex; flex-direction: column; gap: 2px; }
+    .row input {
+      background: #0d1117;
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 6px 8px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 12px;
+      min-width: 110px;
+    }
+    .row input.wide { min-width: 360px; }
+    button {
+      background: var(--accent);
+      color: #0d1117;
+      border: 0;
+      padding: 8px 16px;
+      border-radius: 4px;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    button.danger { background: var(--err); color: white; }
+    button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .summary { display: flex; gap: 10px; flex-wrap: wrap; }
+    .stat {
+      background: #0d1117;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 8px 14px;
+      text-align: center;
+      min-width: 100px;
+    }
+    .stat .label { font-size: 9px; text-transform: uppercase; color: var(--muted); letter-spacing: 1px; }
+    .stat .value { font-size: 20px; font-weight: 600; margin-top: 2px; font-family: monospace; }
+    .stat.ok .value { color: var(--ok); }
+    .stat.warn .value { color: var(--warn); }
+    .stat.err .value { color: var(--err); }
+    table { width: 100%; border-collapse: collapse; font-family: monospace; font-size: 11px; }
+    th, td { padding: 5px 8px; border-bottom: 1px solid var(--border); text-align: left; }
+    th { color: var(--muted); text-transform: uppercase; letter-spacing: 1px; font-size: 10px; background: var(--panel); }
+    td.last-progress { color: var(--muted); max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+    .dot.pending { background: var(--muted); }
+    .dot.loading { background: var(--warn); animation: pulse 1.5s infinite; }
+    .dot.running { background: var(--accent); animation: pulse 1.5s infinite; }
+    .dot.complete { background: var(--ok); }
+    .dot.error { background: var(--err); }
+    .dot.blocked { background: var(--err); }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .warning {
+      background: rgba(210, 153, 34, 0.12);
+      border: 1px solid var(--warn);
+      border-radius: 4px;
+      padding: 10px 14px;
+      font-size: 12px;
+      margin-bottom: 10px;
+      color: var(--warn);
+      line-height: 1.5;
+    }
+    .warning b { color: #f0d878; }
+    .warning code { background: rgba(0,0,0,0.3); padding: 1px 5px; border-radius: 3px; color: #eec864; }
+    .log-area {
+      background: #0d1117;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 8px;
+      font-family: monospace;
+      font-size: 11px;
+      max-height: 180px;
+      overflow: auto;
+      color: var(--muted);
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <h1>PICon Frontend Load Test — Popup Coordinator</h1>
+
+  <div class="warning">
+    <b>Before running, three things:</b><br>
+    1. <b>Allow popups</b> for this site. First time you click Spawn, the browser will block most of them — look for the popup-blocked icon in the address bar, click "Always allow popups from <code>kaist-edlab.github.io</code>", then Spawn again.<br>
+    2. On Railway: set <code>MAX_COST_PER_IP_DAILY=0</code> and optionally bump <code>MAX_CONCURRENT_JOBS</code>. Restore after test. (All popups share this machine's IP, so the daily cap would trip instantly otherwise. There's no other IP-based logic in the backend, so with the cap off, 50-from-1-IP behaves identically to 50-from-50-IPs as far as the API is concerned.)<br>
+    3. Start small — <b>N=5</b> first to verify popups, form-fill, and backend all work end-to-end. Then ramp to 10, 20, 50. Each popup is a real top-level browser window consuming real memory; your OS may start thrashing past ~30 visible windows.
+  </div>
+
+  <div class="panel">
+    <h2>Config</h2>
+    <div class="row">
+      <label>Demo URL
+        <input id="demo_url" class="wide" value="/picon/demo/">
+      </label>
+      <label>Mode
+        <select id="mode" style="background:#0d1117;border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-family:monospace;font-size:12px;">
+          <option value="experience">experience (auto-respond as random persona)</option>
+          <option value="external">external (endpoint URL)</option>
+          <option value="quick">quick (model + API key + random persona)</option>
+        </select>
+      </label>
+    </div>
+    <div class="row" id="row_external" style="margin-top: 10px;">
+      <label>Agent endpoint (random responder cloudflared URL)
+        <input id="endpoint" class="wide" placeholder="https://xxx.trycloudflare.com" value="">
+      </label>
+    </div>
+    <div class="row" id="row_quick" style="margin-top: 10px; display: none;">
+      <label>Model (e.g. gemini/gemini-2.5-flash, openai/gpt-4o-mini)
+        <input id="quick_model" class="wide" placeholder="gemini/gemini-2.5-flash" value="">
+      </label>
+      <label>API key (your own — covers agent inference)
+        <input id="quick_api_key" class="wide" type="password" placeholder="sk-... / AIza...">
+      </label>
+    </div>
+    <div class="row" style="margin-top: 10px;">
+      <label>Concurrent N
+        <input id="concurrent" type="number" value="5" min="1" max="100">
+      </label>
+      <label>Turns (total picon turns; backend floor = 15, so values &lt;15 have no effect)
+        <input id="turns" type="number" value="15" min="1" max="100">
+      </label>
+      <label>Sessions (any value — injected into popup dropdown)
+        <input id="sessions" type="number" value="1" min="1" max="5">
+      </label>
+      <label>Name prefix
+        <input id="prefix" value="loadtest">
+      </label>
+      <label>Stagger (ms)
+        <input id="stagger" type="number" value="250" min="0" max="5000">
+      </label>
+      <label>Window size
+        <input id="winsize" value="420x340">
+      </label>
+    </div>
+    <div class="row" style="margin-top: 12px;">
+      <button id="start_btn">Spawn N popups &amp; run</button>
+      <button id="focus_btn" class="ghost">Bring all popups forward</button>
+      <button id="cancel_btn" class="danger" disabled>Close all popups</button>
+      <button id="clear_btn" class="ghost">Clear table</button>
+      <span id="status_msg" style="color: var(--muted); font-size: 12px;"></span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Summary</h2>
+    <div class="summary">
+      <div class="stat"><div class="label">Total</div><div class="value" id="s_total">0</div></div>
+      <div class="stat warn"><div class="label">Blocked</div><div class="value" id="s_blocked">0</div></div>
+      <div class="stat warn"><div class="label">Loading</div><div class="value" id="s_loading">0</div></div>
+      <div class="stat ok"><div class="label">Running</div><div class="value" id="s_running">0</div></div>
+      <div class="stat ok"><div class="label">Complete</div><div class="value" id="s_complete">0</div></div>
+      <div class="stat err"><div class="label">Error</div><div class="value" id="s_error">0</div></div>
+      <div class="stat warn"><div class="label">Elapsed</div><div class="value" id="s_elapsed">0s</div></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Popups</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Name</th>
+          <th>Status</th>
+          <th>Progress (from popup)</th>
+          <th>Elapsed</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="popups_tbody"></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Coordinator event log</h2>
+    <div class="log-area" id="event_log"></div>
+  </div>
+
+<script>
+(function () {
+  var startBtn = document.getElementById('start_btn');
+  var cancelBtn = document.getElementById('cancel_btn');
+  var clearBtn = document.getElementById('clear_btn');
+  var focusBtn = document.getElementById('focus_btn');
+  var statusMsg = document.getElementById('status_msg');
+  var tbody = document.getElementById('popups_tbody');
+  var eventLog = document.getElementById('event_log');
+
+  var CFG_KEY = 'picon_loadtest_popup_cfg';
+  // Note: api key is intentionally NOT persisted to localStorage.
+  var CFG_FIELDS = ['demo_url', 'mode', 'endpoint', 'quick_model', 'concurrent', 'turns', 'sessions', 'prefix', 'stagger', 'winsize'];
+  function loadCfg() {
+    try {
+      var c = JSON.parse(localStorage.getItem(CFG_KEY) || '{}');
+      CFG_FIELDS.forEach(function (k) {
+        if (c[k] !== undefined) document.getElementById(k).value = c[k];
+      });
+    } catch (e) {}
+  }
+  function saveCfg() {
+    var c = {};
+    CFG_FIELDS.forEach(function (k) { c[k] = document.getElementById(k).value; });
+    try { localStorage.setItem(CFG_KEY, JSON.stringify(c)); } catch (e) {}
+  }
+  loadCfg();
+
+  // Show/hide mode-specific rows.
+  var modeSelect = document.getElementById('mode');
+  function applyModeVisibility() {
+    var m = modeSelect.value;
+    document.getElementById('row_external').style.display = (m === 'external') ? '' : 'none';
+    document.getElementById('row_quick').style.display = (m === 'quick') ? '' : 'none';
+  }
+  modeSelect.addEventListener('change', applyModeVisibility);
+  applyModeVisibility();
+
+  // Embedded persona pool (mirrors tests/personas.py — kept short so each
+  // popup's system prompt isn't wasted context). Each popup picks one at random.
+  var PERSONAS = [
+    {
+      name: 'Park Jiwon',
+      description:
+        'Park Jiwon, a 25-year-old software engineer from Busan, Korea. ' +
+        'Works at a startup in Seoul building mobile apps. ' +
+        'Studied computer engineering at POSTECH. ' +
+        'Enjoys surfing at Haeundae Beach and playing guitar. ' +
+        'Has an older brother who is a doctor in Busan.',
+      facts: [
+        'My name is Park Jiwon.',
+        'I am 25 years old.',
+        'I was born in 2001 in Busan, Korea.',
+        'I work as a software engineer at a startup in Seoul.',
+        'The startup builds mobile apps for the Korean market.',
+        'I studied computer engineering at POSTECH.',
+        'I enjoy surfing at Haeundae Beach whenever I visit home.',
+        'I play acoustic guitar as a hobby, mostly indie rock.',
+        'My favorite band is Hyukoh.',
+        'I have one older brother who is a medical doctor in Busan.',
+        'My brother works at Pusan National University Hospital.',
+        'I live in a one-room apartment in Gangnam district, Seoul.',
+        'I commute to work by subway, Line 2.',
+        'My favorite food is dwaeji gukbap, a Busan specialty.',
+        'I drink coffee every morning, usually an iced Americano.',
+        'I exercise at a gym twice a week, mostly weight training.',
+        'I studied abroad for one semester at NTU in Singapore.'
+      ]
+    },
+    {
+      name: 'Lee Hyunwoo',
+      description:
+        'Lee Hyunwoo, a 32-year-old high school math teacher from Daegu, Korea. ' +
+        'Teaches at Daegu Science High School. ' +
+        'Married with one young daughter named Seoyeon. ' +
+        'Graduated from Seoul National University with a degree in mathematics. ' +
+        'Loves board games and enjoys brewing coffee at home.',
+      facts: [
+        'My name is Lee Hyunwoo.',
+        'I am 32 years old.',
+        'I was born in 1994 in Daegu, Korea.',
+        'I teach mathematics at Daegu Science High School.',
+        'I have been teaching for six years.',
+        'I graduated from Seoul National University.',
+        'I majored in mathematics at SNU and graduated in 2018.',
+        'I am married to my wife Minji, who is a librarian.',
+        'We have a four-year-old daughter named Seoyeon.',
+        'I collect board games and own more than eighty of them.',
+        'My favorite board game is Terraforming Mars.',
+        'I brew pour-over coffee at home every morning.',
+        'I prefer Ethiopian Yirgacheffe beans.',
+        'My father is a retired civil servant, my mother runs a small bakery.',
+        'I have one younger sister who works at Samsung Electronics.',
+        'I drive a used Hyundai Sonata to work.',
+        'On weekends I take my daughter to the playground near our apartment.'
+      ]
+    },
+    {
+      name: 'Kim Soojin',
+      description:
+        'Kim Soojin, a 28-year-old PhD student in marine biology at Jeju National University. ' +
+        'Originally from Incheon. Studies coral reef ecosystems. ' +
+        'Single, lives alone with a rescue cat named Bada. ' +
+        'Passionate about environmental conservation and scuba diving.',
+      facts: [
+        'My name is Kim Soojin.',
+        'I am 28 years old.',
+        'I was born in 1998 in Incheon, Korea.',
+        'I am a PhD student in marine biology at Jeju National University.',
+        'I am in the fourth year of my PhD program.',
+        'My research focuses on coral reef ecosystems around Jeju Island.',
+        'My advisor is Professor Han Jeonghee.',
+        'I did my undergraduate at Inha University in biology.',
+        'I have a rescue cat named Bada, which means sea in Korean.',
+        'I am a certified PADI Divemaster.',
+        'I scuba dive almost every weekend when weather permits.',
+        'I am passionate about protecting marine ecosystems from pollution.',
+        'I volunteer with an ocean cleanup NGO once a month.',
+        'I am single and not currently dating.',
+        'My parents still live in Incheon and run a small seafood restaurant.',
+        'I have one younger brother serving in the Korean army.',
+        'My favorite food is my mothers jjamppong.'
+      ]
+    }
+  ];
+  function randomPersona() {
+    return PERSONAS[Math.floor(Math.random() * PERSONAS.length)];
+  }
+  function systemPromptFromPersona(persona) {
+    return 'You are ' + persona.description + '\n\n' +
+      'You are being interviewed. Answer questions naturally and stay in character. ' +
+      'Keep responses concise (1-3 sentences). ' +
+      "If you don't know something about yourself, make up a consistent detail " +
+      'and remember it for future questions.';
+  }
+  // Canned responses for experience mode auto-responder. Varied enough to
+  // keep picon's pipeline engaged (entity extraction, web search, follow-ups).
+  var CANNED_RESPONSES = [
+    "My name is Kim Minseo and I'm 29 years old.",
+    "I was born in Seoul, Korea and grew up in Gangnam district.",
+    "I work as a data analyst at a fintech startup in Pangyo.",
+    "I studied statistics at Korea University and graduated in 2019.",
+    "I have a younger sister who is studying nursing at Yonsei.",
+    "My favorite hobby is hiking, I go to Bukhansan almost every weekend.",
+    "I really enjoy cooking Italian food, especially pasta and risotto.",
+    "I adopted a dog named Mochi last year, he's a golden retriever.",
+    "I think climate change is the most important issue of our generation.",
+    "I used to play the piano when I was in middle school but stopped.",
+    "My parents live in Bundang and my father is a retired teacher.",
+    "I'm currently saving up to travel to Portugal next summer.",
+    "I prefer working from home because I can focus better without office noise.",
+    "I drink about three cups of green tea every day.",
+    "I volunteer at a local animal shelter on weekends when I have time.",
+    "I'm not very religious but I sometimes visit Buddhist temples for meditation.",
+    "My favorite movie is Parasite, I've watched it at least five times.",
+    "I commute to work by bus, it takes about 40 minutes each way.",
+    "I recently started learning Spanish using an app on my phone.",
+    "I believe education should be more accessible to everyone regardless of income."
+  ];
+  function autoResponse() {
+    return CANNED_RESPONSES[Math.floor(Math.random() * CANNED_RESPONSES.length)];
+  }
+
+  var popups = [];  // {index, name, win, row, status, startedAt, finalElapsed}
+  var testStartedAt = null;
+  var monitorTimer = null;
+  var elapsedTimer = null;
+
+  function logEvent(msg) {
+    var ts = new Date().toISOString().split('T')[1].split('.')[0];
+    eventLog.textContent += '[' + ts + '] ' + msg + '\n';
+    eventLog.scrollTop = eventLog.scrollHeight;
+  }
+
+  function fmtElapsed(seconds) {
+    if (seconds < 60) return seconds.toFixed(0) + 's';
+    var m = Math.floor(seconds / 60);
+    var s = Math.floor(seconds % 60);
+    return m + 'm' + (s < 10 ? '0' : '') + s + 's';
+  }
+
+  function createRow(index, name) {
+    var tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td>' + index + '</td>' +
+      '<td>' + name + '</td>' +
+      '<td class="status-cell"><span class="dot pending"></span>pending</td>' +
+      '<td class="progress-cell last-progress">—</td>' +
+      '<td class="elapsed-cell">—</td>' +
+      '<td><button class="ghost focus-one" style="padding: 3px 8px; font-size: 10px;">focus</button></td>';
+    tbody.appendChild(tr);
+    return tr;
+  }
+
+  function setStatus(pop, status) {
+    pop.status = status;
+    var cell = pop.row.querySelector('.status-cell');
+    cell.innerHTML = '<span class="dot ' + status + '"></span>' + status;
+  }
+
+  function driveWindow(pop, payload) {
+    // The popup just opened with about:blank (or the target URL). We need to
+    // wait until its document is the demo page AND demo.js has attached its
+    // listeners. We poll for the Agent Test tab button to exist.
+    var attempts = 0;
+    var maxAttempts = 60;  // ~30s
+    function tryDrive() {
+      attempts++;
+      if (!pop.win || pop.win.closed) {
+        setStatus(pop, 'error');
+        logEvent('#' + pop.index + ' window closed before drive');
+        return;
+      }
+      var doc;
+      try { doc = pop.win.document; } catch (e) {
+        // Cross-origin during initial navigation — wait and retry
+        if (attempts < maxAttempts) { setTimeout(tryDrive, 500); return; }
+        setStatus(pop, 'error');
+        logEvent('#' + pop.index + ' cross-origin (check demo_url)');
+        return;
+      }
+      var agentTab = doc.querySelector('.demo-tab[data-tab="agent-test"]');
+      if (!agentTab) {
+        if (attempts < maxAttempts) { setTimeout(tryDrive, 500); return; }
+        setStatus(pop, 'error');
+        logEvent('#' + pop.index + ' agent-test tab never appeared');
+        return;
+      }
+
+      // Helper: set a value on an element. If it's a <select> and the
+      // requested value isn't already an option, inject a new <option> on
+      // the fly — this lets the load test use low values (e.g. turns=5) to
+      // keep cost down without touching the real demo's dropdown.
+      function setField(el, wanted, label) {
+        if (!el) return;
+        if (el.tagName === 'SELECT') {
+          var target = String(wanted);
+          var options = Array.prototype.map.call(el.options, function (o) { return o.value; });
+          if (options.indexOf(target) === -1) {
+            var opt = el.ownerDocument.createElement('option');
+            opt.value = target;
+            opt.textContent = target + ' (loadtest)';
+            el.appendChild(opt);
+            logEvent('#' + pop.index + ' injected ' + label + '=' + target + ' into dropdown');
+          }
+          el.value = target;
+        } else {
+          el.value = String(wanted);
+        }
+      }
+
+      try {
+        if (payload.mode === 'experience') {
+          // Experience mode: fill name + turns, click start, then auto-respond.
+          var expTab = doc.querySelector('.demo-tab[data-tab="experience"]');
+          if (expTab) expTab.click();
+
+          var expName = doc.getElementById('exp-name');
+          var expTurns = doc.getElementById('exp-turns');
+          var expStartBtn = doc.getElementById('exp-start-btn');
+          if (!expName || !expStartBtn) throw new Error('experience form inputs missing');
+
+          setField(expName, payload.name, 'name');
+          setField(expTurns, payload.turns, 'turns');
+          ['input', 'change'].forEach(function (evt) {
+            [expName, expTurns].forEach(function (el) {
+              if (el) el.dispatchEvent(new Event(evt, { bubbles: true }));
+            });
+          });
+          expStartBtn.click();
+          logEvent('#' + pop.index + ' auto-clicked Start (experience)');
+
+          // Set up auto-responder that polls for new system messages.
+          pop.autoResponder = setInterval(function () {
+            if (!pop.win || pop.win.closed) {
+              clearInterval(pop.autoResponder);
+              return;
+            }
+            try {
+              var d = pop.win.document;
+              // Check if interview is complete
+              var expResults = d.getElementById('exp-results');
+              if (expResults && expResults.style.display && expResults.style.display !== 'none') {
+                clearInterval(pop.autoResponder);
+                return;
+              }
+              // Check if Send button is enabled (means a question is waiting for response)
+              var sendBtn = d.getElementById('exp-send');
+              var inputEl = d.getElementById('exp-input');
+              if (!sendBtn || sendBtn.disabled || !inputEl || inputEl.disabled) return;
+              // Check there's at least one system message (question ready)
+              var msgs = d.querySelectorAll('#exp-messages .chat-msg.system');
+              var userMsgs = d.querySelectorAll('#exp-messages .chat-msg.user');
+              // Only respond if there's a new unanswered system message
+              if (msgs.length === 0 || msgs.length <= userMsgs.length) return;
+              var response = autoResponse();
+              pop.responseCount = ((pop.responseCount || 0) + 1);
+              inputEl.value = response;
+              inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+              sendBtn.click();
+              logEvent('#' + pop.index + ' auto-responded (turn ' + (userMsgs.length + 1) + ')');
+            } catch (e) {
+              // cross-origin or DOM not ready; skip this cycle
+            }
+          }, 2000); // poll every 2s
+
+          pop.startedAt = Date.now();
+          setStatus(pop, 'running');
+          return; // skip the agent-test path below
+        }
+
+        agentTab.click();
+
+        if (payload.mode === 'quick') {
+          var qCard = doc.querySelector('.agent-submode-card[data-submode="quick"]');
+          if (qCard) qCard.click();
+
+          var qName = doc.getElementById('quick-agent-name');
+          var qModel = doc.getElementById('quick-agent-model');
+          var qKey = doc.getElementById('quick-agent-api-key');
+          var qPersona = doc.getElementById('quick-agent-persona');
+          var qTurns = doc.getElementById('quick-agent-turns');
+          var qSessions = doc.getElementById('quick-agent-sessions');
+          if (!qName || !qModel || !qKey || !qPersona) throw new Error('quick form inputs missing');
+
+          setField(qName, payload.name, 'name');
+          setField(qModel, payload.model, 'model');
+          setField(qKey, payload.apiKey, 'api_key');
+          setField(qPersona, payload.personaPrompt, 'persona');
+          setField(qTurns, payload.turns, 'turns');
+          setField(qSessions, payload.sessions, 'sessions');
+          ['input', 'change'].forEach(function (evt) {
+            [qName, qModel, qKey, qPersona, qTurns, qSessions].forEach(function (el) {
+              if (el) el.dispatchEvent(new Event(evt, { bubbles: true }));
+            });
+          });
+
+          var startQ = doc.getElementById('agent-start-btn-quick');
+          if (!startQ) throw new Error('quick start button missing');
+          startQ.click();
+          logEvent('#' + pop.index + ' auto-clicked Start (quick, persona=' + payload.personaName + ')');
+        } else {
+          var extCard = doc.querySelector('.agent-submode-card[data-submode="external"]');
+          if (extCard) extCard.click();
+
+          var nameInput = doc.getElementById('ext-agent-name');
+          var endpointInput = doc.getElementById('ext-agent-endpoint');
+          var turnsInput = doc.getElementById('ext-agent-turns');
+          var sessionsInput = doc.getElementById('ext-agent-sessions');
+          if (!nameInput || !endpointInput) throw new Error('external form inputs missing');
+
+          setField(nameInput, payload.name, 'name');
+          setField(endpointInput, payload.endpoint, 'endpoint');
+          setField(turnsInput, payload.turns, 'turns');
+          setField(sessionsInput, payload.sessions, 'sessions');
+          ['input', 'change'].forEach(function (evt) {
+            [nameInput, endpointInput, turnsInput, sessionsInput].forEach(function (el) {
+              if (el) el.dispatchEvent(new Event(evt, { bubbles: true }));
+            });
+          });
+
+          var startInner = doc.getElementById('agent-start-btn-external');
+          if (!startInner) throw new Error('external start button missing');
+          startInner.click();
+          logEvent('#' + pop.index + ' auto-clicked Start (external)');
+        }
+
+        pop.startedAt = Date.now();
+        setStatus(pop, 'running');
+      } catch (err) {
+        setStatus(pop, 'error');
+        logEvent('#' + pop.index + ' drive failed: ' + err.message);
+      }
+    }
+    setTimeout(tryDrive, 500);
+  }
+
+  function monitorPopups() {
+    var counts = { total: popups.length, blocked: 0, loading: 0, running: 0, complete: 0, error: 0 };
+    popups.forEach(function (pop) {
+      if (pop.status === 'complete') { counts.complete++; return; }
+      if (pop.status === 'error') { counts.error++; return; }
+      if (pop.status === 'blocked') { counts.blocked++; return; }
+
+      if (!pop.win || pop.win.closed) {
+        // Popup was closed by user or OS before finishing — flag as error unless already complete
+        if (pop.status !== 'complete') {
+          setStatus(pop, 'error');
+          logEvent('#' + pop.index + ' window was closed');
+          counts.error++;
+        }
+        return;
+      }
+
+      if (pop.status === 'pending' || pop.status === 'loading') {
+        counts.loading++;
+        return;
+      }
+
+      // Running: peek into the popup DOM and reflect state
+      try {
+        var doc = pop.win.document;
+
+        // Agent test mode indicators
+        var agentProgress = doc.getElementById('agent-progress');
+        var agentResults = doc.getElementById('agent-results');
+        // Experience mode indicators
+        var expResults = doc.getElementById('exp-results');
+        var expProgress = doc.getElementById('exp-progress');
+
+        // Check completion: either agent-results or exp-results visible
+        var isComplete =
+          (agentResults && agentResults.style.display && agentResults.style.display !== 'none') ||
+          (expResults && expResults.style.display && expResults.style.display !== 'none');
+
+        if (isComplete) {
+          setStatus(pop, 'complete');
+          if (pop.autoResponder) { clearInterval(pop.autoResponder); pop.autoResponder = null; }
+          if (!pop.finalElapsed && pop.startedAt) {
+            pop.finalElapsed = (Date.now() - pop.startedAt) / 1000;
+          }
+          pop.row.querySelector('.progress-cell').textContent = 'done';
+          counts.complete++;
+          return;
+        }
+
+        // Progress text: prefer agent-progress, fall back to exp-progress
+        var progressText = (agentProgress && agentProgress.textContent) ||
+                           (expProgress && expProgress.textContent) || '';
+
+        // For experience mode, also show auto-response count
+        if (pop.responseCount) {
+          var userMsgs = doc.querySelectorAll('#exp-messages .chat-msg.user');
+          progressText = 'Responses: ' + (userMsgs ? userMsgs.length : 0) +
+            (progressText ? ' | ' + progressText : '');
+        }
+
+        pop.row.querySelector('.progress-cell').textContent = progressText.slice(0, 80);
+
+        // Check for error patterns in either progress element
+        if (/error|connection lost|results unavailable|failed to start/i.test(progressText)) {
+          setStatus(pop, 'error');
+          if (pop.autoResponder) { clearInterval(pop.autoResponder); pop.autoResponder = null; }
+          counts.error++;
+          return;
+        }
+
+        // For experience mode: also check for error messages in chat
+        if (pop.responseCount !== undefined) {
+          var chatMsgs = doc.querySelectorAll('#exp-messages .chat-msg.info');
+          var lastInfo = chatMsgs.length ? chatMsgs[chatMsgs.length - 1].textContent : '';
+          if (/error/i.test(lastInfo) && !/calculating/i.test(lastInfo)) {
+            setStatus(pop, 'error');
+            if (pop.autoResponder) { clearInterval(pop.autoResponder); pop.autoResponder = null; }
+            pop.row.querySelector('.progress-cell').textContent = lastInfo.slice(0, 80);
+            counts.error++;
+            return;
+          }
+        }
+
+        counts.running++;
+      } catch (e) {
+        counts.running++;
+      }
+
+      if (pop.startedAt) {
+        var e = (Date.now() - pop.startedAt) / 1000;
+        pop.row.querySelector('.elapsed-cell').textContent = fmtElapsed(pop.finalElapsed || e);
+      }
+    });
+
+    document.getElementById('s_total').textContent = counts.total;
+    document.getElementById('s_blocked').textContent = counts.blocked;
+    document.getElementById('s_loading').textContent = counts.loading;
+    document.getElementById('s_running').textContent = counts.running;
+    document.getElementById('s_complete').textContent = counts.complete;
+    document.getElementById('s_error').textContent = counts.error;
+
+    if (popups.length > 0 && counts.loading === 0 && counts.running === 0) {
+      statusMsg.textContent = 'All popups finished (complete=' + counts.complete +
+        ' error=' + counts.error + ' blocked=' + counts.blocked + ')';
+      if (monitorTimer) { clearInterval(monitorTimer); monitorTimer = null; }
+      startBtn.disabled = false;
+    }
+  }
+
+  function updateElapsed() {
+    if (!testStartedAt) return;
+    document.getElementById('s_elapsed').textContent =
+      fmtElapsed((Date.now() - testStartedAt) / 1000);
+  }
+
+  startBtn.addEventListener('click', function () {
+    saveCfg();
+    var demoUrl = document.getElementById('demo_url').value.trim();
+    var mode = modeSelect.value;
+    var endpoint = document.getElementById('endpoint').value.trim();
+    var quickModel = document.getElementById('quick_model').value.trim();
+    var quickApiKey = document.getElementById('quick_api_key').value;
+    var n = parseInt(document.getElementById('concurrent').value);
+    var turns = parseInt(document.getElementById('turns').value);
+    var sessions = parseInt(document.getElementById('sessions').value);
+    var prefix = document.getElementById('prefix').value.trim();
+    var stagger = parseInt(document.getElementById('stagger').value);
+    var winsize = document.getElementById('winsize').value.trim();
+
+    if (!demoUrl || !n) {
+      alert('Fill in Demo URL and N.');
+      return;
+    }
+    if (mode === 'external' && !endpoint) {
+      alert('Fill in agent endpoint for external mode.');
+      return;
+    }
+    if (mode === 'quick' && (!quickModel || !quickApiKey)) {
+      alert('Fill in Model and API key for quick mode.');
+      return;
+    }
+
+    // Reset previous run's closed/stale popups from table
+    popups.forEach(function (p) { try { if (p.win && !p.win.closed) p.win.close(); } catch (e) {} });
+    popups = [];
+    tbody.innerHTML = '';
+    eventLog.textContent = '';
+    testStartedAt = Date.now();
+    statusMsg.textContent = 'Opening ' + n + ' popups...';
+    startBtn.disabled = true;
+    cancelBtn.disabled = false;
+
+    var wm = winsize.match(/(\d+)x(\d+)/);
+    var w = wm ? parseInt(wm[1]) : 420;
+    var h = wm ? parseInt(wm[2]) : 340;
+    var cols = Math.max(1, Math.floor((screen.availWidth || 1280) / w));
+
+    if (mode === 'experience') {
+      logEvent('Spawning N=' + n + ' turns=' + turns +
+        ' mode=experience (auto-responding as random personas)');
+    } else if (mode === 'quick') {
+      logEvent('Spawning N=' + n + ' turns=' + turns + ' sessions=' + sessions +
+        ' mode=quick model=' + quickModel + ' (personas randomized per popup)');
+    } else {
+      logEvent('Spawning N=' + n + ' turns=' + turns + ' sessions=' + sessions +
+        ' mode=external endpoint=' + endpoint);
+    }
+
+    for (var i = 1; i <= n; i++) {
+      (function (idx) {
+        setTimeout(function () {
+          var name = prefix + '-' + idx;
+          var row = createRow(idx, name);
+          var pop = {
+            index: idx,
+            name: name,
+            win: null,
+            row: row,
+            status: 'pending',
+            startedAt: null,
+            finalElapsed: null,
+          };
+          popups.push(pop);
+
+          // Bind focus button on this row
+          row.querySelector('.focus-one').addEventListener('click', function () {
+            try { if (pop.win && !pop.win.closed) pop.win.focus(); } catch (e) {}
+          });
+
+          // Layout popups in a grid on the screen
+          var col = (idx - 1) % cols;
+          var rowY = Math.floor((idx - 1) / cols);
+          var left = col * w;
+          var top = rowY * h;
+          var features = [
+            'popup=yes',
+            'width=' + w,
+            'height=' + h,
+            'left=' + left,
+            'top=' + top,
+            'noopener=no',
+          ].join(',');
+
+          var win;
+          try {
+            win = window.open(demoUrl, '_picon_loadtest_' + idx, features);
+          } catch (e) {
+            win = null;
+          }
+
+          if (!win) {
+            setStatus(pop, 'blocked');
+            logEvent('#' + idx + ' BLOCKED by popup blocker — allow popups for this origin and retry');
+            return;
+          }
+
+          pop.win = win;
+          setStatus(pop, 'loading');
+          logEvent('#' + idx + ' opened');
+
+          var payload = {
+            mode: mode,
+            name: name,
+            turns: turns,
+            sessions: sessions,
+          };
+          if (mode === 'quick') {
+            var persona = randomPersona();
+            payload.personaName = persona.name;
+            payload.model = quickModel;
+            payload.apiKey = quickApiKey;
+            payload.personaPrompt = systemPromptFromPersona(persona);
+          } else if (mode === 'external') {
+            payload.endpoint = endpoint;
+          }
+          driveWindow(pop, payload);
+        }, (i - 1) * stagger);
+      })(i);
+    }
+
+    monitorTimer = setInterval(monitorPopups, 1500);
+    elapsedTimer = setInterval(updateElapsed, 1000);
+  });
+
+  cancelBtn.addEventListener('click', function () {
+    if (!confirm('Close all popups? This will abandon in-flight jobs on the server.')) return;
+    popups.forEach(function (pop) {
+      if (pop.autoResponder) { clearInterval(pop.autoResponder); pop.autoResponder = null; }
+      try {
+        if (pop.win && !pop.win.closed) {
+          // Try to click cancel first so the server frees its slot cleanly
+          try {
+            var doc = pop.win.document;
+            var cbtn = doc.getElementById('agent-cancel-btn');
+            if (cbtn) cbtn.click();
+          } catch (e) {}
+          pop.win.close();
+        }
+      } catch (e) {}
+    });
+    if (monitorTimer) { clearInterval(monitorTimer); monitorTimer = null; }
+    statusMsg.textContent = 'All popups closed.';
+    startBtn.disabled = false;
+    cancelBtn.disabled = true;
+  });
+
+  focusBtn.addEventListener('click', function () {
+    popups.forEach(function (pop) {
+      try { if (pop.win && !pop.win.closed) pop.win.focus(); } catch (e) {}
+    });
+  });
+
+  clearBtn.addEventListener('click', function () {
+    popups.forEach(function (p) {
+      if (p.autoResponder) { clearInterval(p.autoResponder); p.autoResponder = null; }
+      try { if (p.win && !p.win.closed) p.win.close(); } catch (e) {}
+    });
+    popups = [];
+    tbody.innerHTML = '';
+    eventLog.textContent = '';
+    if (monitorTimer) { clearInterval(monitorTimer); monitorTimer = null; }
+    if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+    testStartedAt = null;
+    statusMsg.textContent = '';
+    ['s_total', 's_blocked', 's_loading', 's_running', 's_complete', 's_error'].forEach(function (id) {
+      document.getElementById(id).textContent = '0';
+    });
+    document.getElementById('s_elapsed').textContent = '0s';
+    startBtn.disabled = false;
+    cancelBtn.disabled = true;
+  });
+})();
+</script>
+</body>
+</html>
