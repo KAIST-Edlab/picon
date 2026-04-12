@@ -483,39 +483,11 @@
           expStartBtn.click();
           logEvent('#' + pop.index + ' auto-clicked Start (experience)');
 
-          // Set up auto-responder that polls for new system messages.
-          pop.autoResponder = setInterval(function () {
-            if (!pop.win || pop.win.closed) {
-              clearInterval(pop.autoResponder);
-              return;
-            }
-            try {
-              var d = pop.win.document;
-              // Check if interview is complete
-              var expResults = d.getElementById('exp-results');
-              if (expResults && expResults.style.display && expResults.style.display !== 'none') {
-                clearInterval(pop.autoResponder);
-                return;
-              }
-              // Check if Send button is enabled (means a question is waiting for response)
-              var sendBtn = d.getElementById('exp-send');
-              var inputEl = d.getElementById('exp-input');
-              if (!sendBtn || sendBtn.disabled || !inputEl || inputEl.disabled) return;
-              // Check there's at least one system message (question ready)
-              var msgs = d.querySelectorAll('#exp-messages .chat-msg.system');
-              var userMsgs = d.querySelectorAll('#exp-messages .chat-msg.user');
-              // Only respond if there's a new unanswered system message
-              if (msgs.length === 0 || msgs.length <= userMsgs.length) return;
-              var response = autoResponse();
-              pop.responseCount = ((pop.responseCount || 0) + 1);
-              inputEl.value = response;
-              inputEl.dispatchEvent(new Event('input', { bubbles: true }));
-              sendBtn.click();
-              logEvent('#' + pop.index + ' auto-responded (turn ' + (userMsgs.length + 1) + ')');
-            } catch (e) {
-              // cross-origin or DOM not ready; skip this cycle
-            }
-          }, 2000); // poll every 2s
+          // Auto-response is driven from the coordinator's monitorPopups loop
+          // (foreground window), NOT from per-popup setIntervals — this avoids
+          // browser throttling of background tabs/popups.
+          pop.isExperience = true;
+          pop.responseCount = 0;
 
           pop.startedAt = Date.now();
           setStatus(pop, 'running');
@@ -628,7 +600,6 @@
 
         if (isComplete) {
           setStatus(pop, 'complete');
-          if (pop.autoResponder) { clearInterval(pop.autoResponder); pop.autoResponder = null; }
           if (!pop.finalElapsed && pop.startedAt) {
             pop.finalElapsed = (Date.now() - pop.startedAt) / 1000;
           }
@@ -637,12 +608,33 @@
           return;
         }
 
+        // Auto-respond for experience mode popups (driven from coordinator
+        // foreground to avoid browser throttling of background windows)
+        if (pop.isExperience) {
+          try {
+            var sendBtn = doc.getElementById('exp-send');
+            var inputEl = doc.getElementById('exp-input');
+            if (sendBtn && !sendBtn.disabled && inputEl && !inputEl.disabled) {
+              var sysMsgs = doc.querySelectorAll('#exp-messages .chat-msg.system');
+              var usrMsgs = doc.querySelectorAll('#exp-messages .chat-msg.user');
+              if (sysMsgs.length > 0 && sysMsgs.length > usrMsgs.length) {
+                var response = autoResponse();
+                pop.responseCount = (pop.responseCount || 0) + 1;
+                inputEl.value = response;
+                inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+                sendBtn.click();
+                logEvent('#' + pop.index + ' auto-responded (turn ' + (usrMsgs.length + 1) + ')');
+              }
+            }
+          } catch (e) { /* cross-origin or DOM not ready */ }
+        }
+
         // Progress text: prefer agent-progress, fall back to exp-progress
         var progressText = (agentProgress && agentProgress.textContent) ||
                            (expProgress && expProgress.textContent) || '';
 
         // For experience mode, also show auto-response count
-        if (pop.responseCount) {
+        if (pop.isExperience) {
           var userMsgs = doc.querySelectorAll('#exp-messages .chat-msg.user');
           progressText = 'Responses: ' + (userMsgs ? userMsgs.length : 0) +
             (progressText ? ' | ' + progressText : '');
@@ -653,18 +645,16 @@
         // Check for error patterns in either progress element
         if (/error|connection lost|results unavailable|failed to start/i.test(progressText)) {
           setStatus(pop, 'error');
-          if (pop.autoResponder) { clearInterval(pop.autoResponder); pop.autoResponder = null; }
           counts.error++;
           return;
         }
 
         // For experience mode: also check for error messages in chat
-        if (pop.responseCount !== undefined) {
+        if (pop.isExperience) {
           var chatMsgs = doc.querySelectorAll('#exp-messages .chat-msg.info');
           var lastInfo = chatMsgs.length ? chatMsgs[chatMsgs.length - 1].textContent : '';
           if (/error/i.test(lastInfo) && !/calculating/i.test(lastInfo)) {
             setStatus(pop, 'error');
-            if (pop.autoResponder) { clearInterval(pop.autoResponder); pop.autoResponder = null; }
             pop.row.querySelector('.progress-cell').textContent = lastInfo.slice(0, 80);
             counts.error++;
             return;
@@ -835,7 +825,6 @@
   cancelBtn.addEventListener('click', function () {
     if (!confirm('Close all popups? This will abandon in-flight jobs on the server.')) return;
     popups.forEach(function (pop) {
-      if (pop.autoResponder) { clearInterval(pop.autoResponder); pop.autoResponder = null; }
       try {
         if (pop.win && !pop.win.closed) {
           // Try to click cancel first so the server frees its slot cleanly
@@ -862,7 +851,6 @@
 
   clearBtn.addEventListener('click', function () {
     popups.forEach(function (p) {
-      if (p.autoResponder) { clearInterval(p.autoResponder); p.autoResponder = null; }
       try { if (p.win && !p.win.closed) p.win.close(); } catch (e) {}
     });
     popups = [];
