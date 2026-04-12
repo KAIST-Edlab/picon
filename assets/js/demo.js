@@ -103,7 +103,9 @@
       repeat: 'Part 3: Retest',
       complete: 'Complete'
     }[progress.phase] || progress.phase;
-    el.textContent = phase + ' — Q' + progress.current + '/' + progress.total;
+    el.textContent = progress.total
+      ? phase + ' — Q' + progress.current + '/' + progress.total
+      : phase + ' — Q' + progress.current;
   }
 
   function fmtScore(v) {

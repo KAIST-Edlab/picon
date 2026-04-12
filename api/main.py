@@ -561,7 +561,7 @@ async def experience_start(req: ExperienceStartRequest, request: Request):
         "response_queue": queue.Queue(),
         "task": None,
         "status": "queued",
-        "progress": {"phase": "init", "current": 0, "total": req.num_turns},
+        "progress": {"phase": "init", "current": 0, "total": None},
         "result": None,
         "error": None,
         "name": req.name,
