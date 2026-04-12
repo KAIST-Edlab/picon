@@ -263,11 +263,16 @@
             if (rRes.ok) {
               var results = await rRes.json();
               if (results.status === 'complete' && results.results && results.results.eval_scores) {
+                var evalScores = results.results.eval_scores || {};
+                var hasScores = evalScores.ic != null || evalScores.ec != null || evalScores.rc != null;
                 var expResultsEl = document.getElementById('exp-results');
                 expResultsEl.style.display = 'block';
+                if (!hasScores) {
+                  addMessage(expMessages, 'info', 'Evaluation could not produce scores — the interview may have been too short or was flagged by the AI detector.');
+                }
                 renderScoreGrid(
                   document.getElementById('exp-score-grid'),
-                  results.results.eval_scores || {}
+                  evalScores
                 );
                 break;
               } else if (results.status === 'error') {
