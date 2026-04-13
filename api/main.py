@@ -227,6 +227,18 @@ def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict, openai_
     if extra_env:
         for k, v in extra_env.items():
             os.environ[k] = str(v)
+    # Server-owned Azure creds for picon's evaluator (modified monitoring required
+    # since Experience mode collects human data). Stored under PICON_AZURE_* on
+    # Railway to avoid collision with any user-supplied AZURE_* and mapped to the
+    # names litellm expects here, AFTER extra_env so server config always wins.
+    for src, dst in (
+        ("PICON_AZURE_API_KEY", "AZURE_API_KEY"),
+        ("PICON_AZURE_API_BASE", "AZURE_API_BASE"),
+        ("PICON_AZURE_API_VERSION", "AZURE_API_VERSION"),
+    ):
+        val = os.environ.get(src)
+        if val:
+            os.environ[dst] = val
 
     # Install log capture BEFORE importing picon so its module-level logger setup is intercepted.
     import logging as _logging
@@ -489,6 +501,10 @@ _EXTRA_ENV_DENYLIST = {
     "OPENAI_API_KEY", "OPENAI_API_KEYS",
     "GEMINI_API_KEY",
     "SERPER_API_KEY", "TAVILY_API_KEY",
+    # Note: AZURE_API_KEY/BASE/VERSION are NOT denylisted — the server's own Azure
+    # creds live under PICON_AZURE_* and are re-applied after extra_env in the
+    # worker, so a user-supplied AZURE_* cannot overwrite them. Leech risk for
+    # azure/azure_ai agents is closed by the leech-prefix check in agent_start.
     # Server config
     "BRIDGE_BASE_URL", "MAX_CONCURRENT_JOBS",
     "MAX_COST_PER_IP_DAILY", "MAX_COST_PER_JOB",
@@ -984,7 +1000,7 @@ async def agent_start(req: AgentStartRequest, request: Request):
         # Extra safety: if the model is a first-party cloud provider that we
         # have server-side keys for, litellm could fall back to our keys even
         # when user supplied extra_env. Require an explicit api_key for these.
-        leech_prefixes = ("openai/", "gemini/")
+        leech_prefixes = ("openai/", "gemini/", "azure/", "azure_ai/")
         if not req.api_key and req.model.lower().startswith(leech_prefixes):
             raise HTTPException(
                 status_code=400,
