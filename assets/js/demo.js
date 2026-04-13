@@ -30,21 +30,27 @@
 
   BASELINES.forEach(function (d) { d.area = computeArea(d); });
 
-  // Abandon old cache keys — stale auto-inserted entries (including loadtest-*) lived here.
+  // Abandon the old merged cache key — stale auto-inserted entries lived here.
   try { localStorage.removeItem('picon_community'); } catch (e) { /* ignore */ }
-  try { localStorage.removeItem('picon_my_runs'); } catch (e) { /* ignore */ }
+  // One-time migration: wipe stale loadtest-* entries that leaked into earlier localStorage.
+  try {
+    if (!localStorage.getItem('picon_runs_migrated_v2')) {
+      localStorage.removeItem('picon_my_runs');
+      localStorage.setItem('picon_runs_migrated_v2', '1');
+    }
+  } catch (e) { /* ignore */ }
 
-  // myLocalRuns:   this tab's own completed runs (session-scoped; gone when the window closes)
+  // myLocalRuns:   this browser's own completed runs (shared across tabs via localStorage)
   // publishedEntries: entries explicitly published to the public leaderboard via /api/leaderboard/submit
   var LOCAL_RUNS_KEY = 'picon_my_runs';
   var myLocalRuns = [];
   try {
-    myLocalRuns = JSON.parse(sessionStorage.getItem(LOCAL_RUNS_KEY) || '[]');
+    myLocalRuns = JSON.parse(localStorage.getItem(LOCAL_RUNS_KEY) || '[]');
   } catch (e) { /* ignore */ }
   var publishedEntries = [];
 
   function saveLocalRuns() {
-    try { sessionStorage.setItem(LOCAL_RUNS_KEY, JSON.stringify(myLocalRuns)); } catch (e) { /* ignore */ }
+    try { localStorage.setItem(LOCAL_RUNS_KEY, JSON.stringify(myLocalRuns)); } catch (e) { /* ignore */ }
   }
 
   function fetchCommunityEntries() {
