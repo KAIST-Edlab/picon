@@ -320,6 +320,7 @@
   var agentSessionId = null;
   var agentLogIndex = 0;  // track how many log lines we've fetched
   var activeSubmode = 'external';
+  var pendingLeaderboardEntry = null;
 
   // Submode switching
   document.querySelectorAll('.agent-submode-card').forEach(function (card) {
@@ -510,8 +511,8 @@
               results.scores || {}
             );
 
-            // Add to this browser's private history (not published to anyone else).
-            var entry = {
+            // Store pending entry for the submit button (not added to leaderboard yet).
+            pendingLeaderboardEntry = {
               name: results.name || 'Agent',
               type: 'community',
               arch: 'Community',
@@ -520,10 +521,7 @@
               ec: results.scores.ec || 0,
               rc: results.scores.rc || 0,
             };
-            entry.area = computeArea(entry);
-            myLocalRuns.push(entry);
-            saveLocalRuns();
-            renderLeaderboard();
+            pendingLeaderboardEntry.area = computeArea(pendingLeaderboardEntry);
           } else {
             appendTerminal('\nCould not fetch final results after several retries. ' +
               'The evaluation completed on the server — try refreshing.\n');
@@ -564,11 +562,33 @@
     });
   }
 
+  // Submit to leaderboard button (adds to browser-local leaderboard only)
+  var submitLbBtn = document.getElementById('agent-submit-lb-btn');
+  if (submitLbBtn) {
+    submitLbBtn.addEventListener('click', function () {
+      if (!pendingLeaderboardEntry) return;
+      myLocalRuns.push(pendingLeaderboardEntry);
+      saveLocalRuns();
+      pendingLeaderboardEntry = null;
+      submitLbBtn.disabled = true;
+      submitLbBtn.textContent = 'Added!';
+      document.getElementById('agent-leaderboard-note').textContent = 'Your result has been added to the leaderboard.';
+      renderLeaderboard();
+    });
+  }
+
   // Retry button
   var retryBtn = document.getElementById('agent-retry-btn');
   if (retryBtn) {
     retryBtn.addEventListener('click', function () {
       document.getElementById('agent-results').style.display = 'none';
+      if (submitLbBtn) {
+        submitLbBtn.disabled = false;
+        submitLbBtn.textContent = 'Submit to Leaderboard';
+      }
+      document.getElementById('agent-leaderboard-note').textContent =
+        'Add your result to the leaderboard to compare against baselines.';
+      pendingLeaderboardEntry = null;
       showAgentForm();
       agentTerminal.textContent = '';
       agentLogIndex = 0;

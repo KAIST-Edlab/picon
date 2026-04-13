@@ -35,6 +35,9 @@ layout_js: /assets/js/demo.js
       Answer as yourself &mdash; PICon will probe your responses with logically chained follow-ups
       and verify factual claims in real time. At the end, you'll see your consistency scores across
       all three dimensions.
+      A full run is <strong>50 turns</strong> (default), but if you just want a quick taste,
+      try <strong>30 turns</strong> &mdash; the interrogation can take a while!
+      After all questions are done, evaluation may take an additional 2&ndash;3 minutes.
     </div>
 
     <!-- Name entry -->
@@ -191,9 +194,12 @@ layout_js: /assets/js/demo.js
       <div class="results-card">
         <h3>Evaluation Report</h3>
         <div class="score-grid" id="agent-score-grid"></div>
-        <p class="results-note">Your agent has been added to the leaderboard.</p>
+        <p class="results-note" id="agent-leaderboard-note">Add your result to the leaderboard to compare against baselines.</p>
       </div>
-      <button class="btn btn-primary" id="agent-retry-btn" style="margin-top:0.75rem;">Test Another Agent</button>
+      <div style="margin-top:0.75rem; display:flex; gap:0.5rem; flex-wrap:wrap;">
+        <button class="btn btn-accent" id="agent-submit-lb-btn">Submit to Leaderboard</button>
+        <button class="btn btn-primary" id="agent-retry-btn">Test Another Agent</button>
+      </div>
     </div>
   </div>
 
