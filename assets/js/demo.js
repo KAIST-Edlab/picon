@@ -30,20 +30,21 @@
 
   BASELINES.forEach(function (d) { d.area = computeArea(d); });
 
-  // Abandon the old merged cache key — stale auto-inserted entries lived here.
+  // Abandon old cache keys — stale auto-inserted entries (including loadtest-*) lived here.
   try { localStorage.removeItem('picon_community'); } catch (e) { /* ignore */ }
+  try { localStorage.removeItem('picon_my_runs'); } catch (e) { /* ignore */ }
 
-  // myLocalRuns:   this browser's own completed runs (private, localStorage-backed)
+  // myLocalRuns:   this tab's own completed runs (session-scoped; gone when the window closes)
   // publishedEntries: entries explicitly published to the public leaderboard via /api/leaderboard/submit
   var LOCAL_RUNS_KEY = 'picon_my_runs';
   var myLocalRuns = [];
   try {
-    myLocalRuns = JSON.parse(localStorage.getItem(LOCAL_RUNS_KEY) || '[]');
+    myLocalRuns = JSON.parse(sessionStorage.getItem(LOCAL_RUNS_KEY) || '[]');
   } catch (e) { /* ignore */ }
   var publishedEntries = [];
 
   function saveLocalRuns() {
-    try { localStorage.setItem(LOCAL_RUNS_KEY, JSON.stringify(myLocalRuns)); } catch (e) { /* ignore */ }
+    try { sessionStorage.setItem(LOCAL_RUNS_KEY, JSON.stringify(myLocalRuns)); } catch (e) { /* ignore */ }
   }
 
   function fetchCommunityEntries() {
@@ -142,6 +143,7 @@
   var expSessionId = null;
   var expLoading = false;
   var expHeartbeat = null;
+  var pendingExpEntry = null;
 
   document.getElementById('exp-start-btn').addEventListener('click', async function () {
     var name = document.getElementById('exp-name').value.trim();
@@ -274,6 +276,26 @@
                   document.getElementById('exp-score-grid'),
                   evalScores
                 );
+                var expSubmitBtn = document.getElementById('exp-submit-lb-btn');
+                var expNote = document.getElementById('exp-leaderboard-note');
+                if (hasScores) {
+                  pendingExpEntry = {
+                    name: (document.getElementById('exp-name').value.trim() || 'You'),
+                    type: 'community',
+                    arch: 'Community',
+                    turns: parseInt(document.getElementById('exp-turns').value),
+                    ic: evalScores.ic || 0,
+                    ec: evalScores.ec || 0,
+                    rc: evalScores.rc || 0,
+                  };
+                  pendingExpEntry.area = computeArea(pendingExpEntry);
+                  if (expSubmitBtn) { expSubmitBtn.style.display = ''; expSubmitBtn.disabled = false; expSubmitBtn.textContent = 'Submit to Leaderboard'; }
+                  if (expNote) expNote.textContent = 'Add your result to the leaderboard to compare against baselines.';
+                } else {
+                  pendingExpEntry = null;
+                  if (expSubmitBtn) expSubmitBtn.style.display = 'none';
+                  if (expNote) expNote.textContent = '';
+                }
                 break;
               } else if (results.status === 'error') {
                 addMessage(expMessages, 'info', 'Error during evaluation: ' + (results.error || 'Unknown error'));
@@ -312,6 +334,22 @@
   expInput.addEventListener('keydown', function (e) {
     if (e.key === 'Enter') sendExperienceResponse();
   });
+
+  // Submit interview result to leaderboard (session-scoped, this tab only)
+  var expSubmitLbBtn = document.getElementById('exp-submit-lb-btn');
+  if (expSubmitLbBtn) {
+    expSubmitLbBtn.addEventListener('click', function () {
+      if (!pendingExpEntry) return;
+      myLocalRuns.push(pendingExpEntry);
+      saveLocalRuns();
+      pendingExpEntry = null;
+      expSubmitLbBtn.disabled = true;
+      expSubmitLbBtn.textContent = 'Added!';
+      var note = document.getElementById('exp-leaderboard-note');
+      if (note) note.textContent = 'Your result has been added to the leaderboard.';
+      renderLeaderboard();
+    });
+  }
 
   // ===== Agent Test Mode =====
 
