@@ -32,6 +32,7 @@
 
   // Abandon the old merged cache key — stale auto-inserted entries lived here.
   try { localStorage.removeItem('picon_community'); } catch (e) { /* ignore */ }
+  // (v2 migration already ran — removed the one-time wipe to avoid accidental data loss)
 
   // myLocalRuns:   this browser's own completed runs (private, localStorage-backed)
   // publishedEntries: entries explicitly published to the public leaderboard via /api/leaderboard/submit
@@ -45,6 +46,26 @@
   function saveLocalRuns() {
     try { localStorage.setItem(LOCAL_RUNS_KEY, JSON.stringify(myLocalRuns)); } catch (e) { /* ignore */ }
   }
+
+  // Append a single entry to localStorage atomically — re-reads from storage
+  // right before writing, so concurrent tabs/popups don't overwrite each other.
+  function appendLocalRun(entry) {
+    var current = [];
+    try { current = JSON.parse(localStorage.getItem(LOCAL_RUNS_KEY) || '[]'); }
+    catch (e) { current = []; }
+    current.push(entry);
+    try { localStorage.setItem(LOCAL_RUNS_KEY, JSON.stringify(current)); } catch (e) { /* ignore */ }
+    myLocalRuns = current;
+  }
+
+  // Sync in-memory myLocalRuns with what's in localStorage (picks up writes
+  // from other tabs). Called on 'storage' events and before rendering.
+  window.addEventListener('storage', function (e) {
+    if (e.key === LOCAL_RUNS_KEY) {
+      try { myLocalRuns = JSON.parse(e.newValue || '[]'); } catch (_e) {}
+      if (typeof renderLeaderboard === 'function') renderLeaderboard();
+    }
+  });
 
   function fetchCommunityEntries() {
     if (!API_BASE) return;
@@ -339,8 +360,7 @@
   if (expSubmitLbBtn) {
     expSubmitLbBtn.addEventListener('click', function () {
       if (!pendingExpEntry) return;
-      myLocalRuns.push(pendingExpEntry);
-      saveLocalRuns();
+      appendLocalRun(pendingExpEntry);
       pendingExpEntry = null;
       expSubmitLbBtn.disabled = true;
       expSubmitLbBtn.textContent = 'Added!';
@@ -604,8 +624,7 @@
   if (submitLbBtn) {
     submitLbBtn.addEventListener('click', function () {
       if (!pendingLeaderboardEntry) return;
-      myLocalRuns.push(pendingLeaderboardEntry);
-      saveLocalRuns();
+      appendLocalRun(pendingLeaderboardEntry);
       pendingLeaderboardEntry = null;
       submitLbBtn.disabled = true;
       submitLbBtn.textContent = 'Added!';
