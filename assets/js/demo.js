@@ -466,13 +466,34 @@
     var sessions = document.getElementById('quick-agent-sessions').value;
     var apiBase = document.getElementById('quick-agent-api-base').value.trim();
     var apiVersion = document.getElementById('quick-agent-api-version').value.trim();
+    var extraEnvRaw = (document.getElementById('quick-agent-extra-env') || {}).value || '';
+
+    var extraEnv = {};
+    var extraEnvLines = extraEnvRaw.split('\n');
+    for (var i = 0; i < extraEnvLines.length; i++) {
+      var line = extraEnvLines[i].trim();
+      if (!line || line.indexOf('#') === 0) continue;
+      var eq = line.indexOf('=');
+      if (eq <= 0) {
+        alert('Extra Env Vars line "' + line + '" is not in KEY=value form.');
+        return;
+      }
+      var k = line.substring(0, eq).trim();
+      var v = line.substring(eq + 1).trim();
+      if (!k) continue;
+      extraEnv[k] = v;
+    }
+    var hasExtraEnv = Object.keys(extraEnv).length > 0;
 
     if (!name) { alert('Please provide an agent name.'); return; }
     if (!model) { alert('Please provide a model name in LiteLLM format (e.g. openai/gpt-4o, gemini/gemini-2.5-flash).'); return; }
-    if (!apiKey) { alert('Please provide an API key. This covers your agent\'s LLM inference cost only — PICon evaluation cost is on us.'); return; }
+    if (!apiKey && !apiBase && !hasExtraEnv) {
+      alert('Please provide an API key, OR an API Base URL (self-hosted/local), OR provider env vars in "Advanced".');
+      return;
+    }
     if (!persona) { alert('Please provide a persona / system prompt.'); return; }
-    if (model.toLowerCase().indexOf('azure/') === 0 && !apiBase) {
-      alert('Azure models require an API Base URL. Expand "Advanced" and fill in your Azure endpoint.');
+    if (model.toLowerCase().indexOf('azure/') === 0 && !apiBase && !extraEnv['AZURE_API_BASE']) {
+      alert('Azure models require an API Base URL (or AZURE_API_BASE in Extra Env Vars). Expand "Advanced".');
       return;
     }
 
@@ -487,6 +508,7 @@
     };
     if (apiBase) payload.api_base = apiBase;
     if (apiVersion) payload.api_version = apiVersion;
+    if (hasExtraEnv) payload.extra_env = extraEnv;
 
     startAgentEvaluation(payload, name + ', model=' + model + ', turns=' + turns);
   });

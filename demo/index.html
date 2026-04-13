@@ -169,11 +169,11 @@ layout_js: /assets/js/demo.js
         </div>
       </div>
       <div class="form-group">
-        <label for="quick-agent-api-key">API Key <span class="label-hint">(required — covers your agent's LLM inference cost only)</span></label>
+        <label for="quick-agent-api-key">API Key <span class="label-hint">(required unless using a local model via API Base URL — covers your agent's LLM inference cost only)</span></label>
         <input type="password" id="quick-agent-api-key" placeholder="Your API key (e.g. OpenAI, Gemini, Azure)">
       </div>
       <details class="advanced-fields">
-        <summary>Advanced (Azure, custom endpoints, local models)</summary>
+        <summary>Advanced (e.g. Azure, Bedrock, Vertex AI, local models)</summary>
         <div class="form-row" style="margin-top:0.75rem;">
           <div class="form-group" style="flex:2;">
             <label for="quick-agent-api-base">API Base URL <span class="label-hint">(optional)</span></label>
@@ -182,6 +182,14 @@ layout_js: /assets/js/demo.js
           <div class="form-group" style="flex:1;">
             <label for="quick-agent-api-version">API Version <span class="label-hint">(Azure only)</span></label>
             <input type="text" id="quick-agent-api-version" placeholder="e.g. 2024-02-15-preview">
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="quick-agent-extra-env">Extra Environment Variables <span class="label-hint">(optional — one KEY=value per line)</span></label>
+          <textarea id="quick-agent-extra-env" rows="4" placeholder="AWS_ACCESS_KEY_ID=AKIA...&#10;AWS_SECRET_ACCESS_KEY=...&#10;AWS_REGION_NAME=us-east-1"></textarea>
+          <div class="label-hint" style="margin-top:0.25rem;">
+            Useful for providers like Bedrock (AWS_*), Azure (AZURE_*), or any LiteLLM provider that reads credentials from env vars.
+            Reserved names (<code>OPENAI_API_KEY</code>, <code>GEMINI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, server config) are blocked for safety.
           </div>
         </div>
       </details>

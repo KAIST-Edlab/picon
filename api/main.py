@@ -213,7 +213,7 @@ class _QueueLogStream:
         self._buf = ""
 
 
-def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict, openai_key: str = ""):
+def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict, openai_key: str = "", extra_env: Optional[dict] = None):
     """
     Runs inside a subprocess. Sets the assigned OpenAI key in the subprocess
     environment, then calls picon.run(). Used by both Agent Test and Experience modes.
@@ -223,6 +223,10 @@ def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict, openai_
     """
     if openai_key:
         os.environ["OPENAI_API_KEY"] = openai_key
+    # Apply user-supplied env vars (already sanitized by the parent process).
+    if extra_env:
+        for k, v in extra_env.items():
+            os.environ[k] = str(v)
 
     # Install log capture BEFORE importing picon so its module-level logger setup is intercepted.
     import logging as _logging
@@ -472,9 +476,50 @@ class AgentStartRequest(BaseModel):
     api_base: Optional[str] = None
     api_key: Optional[str] = None
     api_version: Optional[str] = None  # for Azure-style providers
+    extra_env: Optional[dict] = None   # arbitrary env vars for litellm (e.g. AWS_*, AZURE_*)
     persona: Optional[str] = None
     num_turns: int = 50
     num_sessions: int = 2
+
+
+# Env var keys the user is NOT allowed to set — would collide with picon's
+# evaluator auth or leak server-internal config.
+_EXTRA_ENV_DENYLIST = {
+    # Picon evaluator / search keys (server-owned)
+    "OPENAI_API_KEY", "OPENAI_API_KEYS",
+    "GEMINI_API_KEY", "ANTHROPIC_API_KEY",
+    "SERPER_API_KEY", "TAVILY_API_KEY",
+    # Server config
+    "BRIDGE_BASE_URL", "MAX_CONCURRENT_JOBS",
+    "MAX_COST_PER_IP_DAILY", "MAX_COST_PER_JOB",
+    "REDIS_URL", "SQLITE_PATH",
+    # Runtime / shell (prevent hijacking)
+    "PATH", "HOME", "PYTHONPATH", "LD_PRELOAD", "LD_LIBRARY_PATH",
+    "OPENBLAS_NUM_THREADS",
+}
+_EXTRA_ENV_DENY_PREFIXES = ("PICON_",)
+
+
+def _sanitize_extra_env(raw: Optional[dict]) -> dict:
+    """Filter user-supplied env vars: reject denylisted keys, coerce to strings.
+
+    Raises HTTPException(400) if a denied key is present.
+    """
+    if not raw:
+        return {}
+    clean: dict[str, str] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str) or not k:
+            continue
+        key = k.strip()
+        up = key.upper()
+        if up in _EXTRA_ENV_DENYLIST or any(up.startswith(p) for p in _EXTRA_ENV_DENY_PREFIXES):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Env var '{key}' is not allowed (reserved by server).",
+            )
+        clean[key] = "" if v is None else str(v)
+    return clean
 
 
 # ===========================================================================
@@ -922,6 +967,34 @@ async def agent_start(req: AgentStartRequest, request: Request):
             raise HTTPException(status_code=400, detail="Model name is required for quick agent mode")
         if not req.persona:
             raise HTTPException(status_code=400, detail="Persona / system prompt is required for quick agent mode")
+        # Prevent agent-inference leeching: without at least some form of
+        # user-provided credentials, litellm would silently fall back to the
+        # server's env (e.g. OPENAI_API_KEY), running the user's agent on our
+        # dime. Require api_key, api_base, or a non-empty extra_env.
+        has_creds = bool(req.api_key) or bool(req.api_base) or bool(req.extra_env)
+        if not has_creds:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Provide credentials for your agent model: an API key, an API Base URL "
+                    "(for local/self-hosted models), or env vars (Advanced — for providers "
+                    "like Bedrock that authenticate via env vars)."
+                ),
+            )
+        # Extra safety: if the model is a first-party cloud provider that we
+        # have server-side keys for, litellm could fall back to our keys even
+        # when user supplied extra_env. Require an explicit api_key for these.
+        leech_prefixes = ("openai/", "gemini/", "anthropic/")
+        if not req.api_key and req.model.lower().startswith(leech_prefixes):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Model '{req.model}' requires an explicit API key (to prevent "
+                    "accidental use of the server's key)."
+                ),
+            )
+        # Validate and filter user-supplied env vars (raises 400 on denylisted keys).
+        req.extra_env = _sanitize_extra_env(req.extra_env)
 
     ip = _client_ip(request)
     await _check_ip_budget(ip)
@@ -1109,7 +1182,7 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
         result_queue = multiprocessing.Queue()
         proc = multiprocessing.Process(
             target=_picon_worker,
-            args=(result_queue, run_kwargs, openai_key),
+            args=(result_queue, run_kwargs, openai_key, req.extra_env if req.mode == "quick" else None),
             daemon=True,
         )
         job["process"] = proc
