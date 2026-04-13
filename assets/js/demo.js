@@ -32,15 +32,8 @@
 
   // Abandon the old merged cache key — stale auto-inserted entries lived here.
   try { localStorage.removeItem('picon_community'); } catch (e) { /* ignore */ }
-  // One-time migration: wipe stale loadtest-* entries that leaked into earlier localStorage.
-  try {
-    if (!localStorage.getItem('picon_runs_migrated_v2')) {
-      localStorage.removeItem('picon_my_runs');
-      localStorage.setItem('picon_runs_migrated_v2', '1');
-    }
-  } catch (e) { /* ignore */ }
 
-  // myLocalRuns:   this browser's own completed runs (shared across tabs via localStorage)
+  // myLocalRuns:   this browser's own completed runs (private, localStorage-backed)
   // publishedEntries: entries explicitly published to the public leaderboard via /api/leaderboard/submit
   var LOCAL_RUNS_KEY = 'picon_my_runs';
   var myLocalRuns = [];
@@ -341,7 +334,7 @@
     if (e.key === 'Enter') sendExperienceResponse();
   });
 
-  // Submit interview result to leaderboard (session-scoped, this tab only)
+  // Submit interview result to the browser-local leaderboard
   var expSubmitLbBtn = document.getElementById('exp-submit-lb-btn');
   if (expSubmitLbBtn) {
     expSubmitLbBtn.addEventListener('click', function () {
