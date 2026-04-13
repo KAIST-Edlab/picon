@@ -64,7 +64,7 @@ layout_js: /assets/js/demo.js
     <div id="exp-chat" style="display:none;">
       <div class="chat-container">
         <div class="chat-header">
-          <h4>PICon Interview</h4>
+          <h4>PICon Interview <span id="exp-turns-badge" class="turns-badge"></span></h4>
           <span class="chat-progress" id="exp-progress"></span>
         </div>
         <div class="chat-messages" id="exp-messages"></div>
@@ -78,7 +78,7 @@ layout_js: /assets/js/demo.js
     <!-- Results card (shown after completion) -->
     <div id="exp-results" style="display:none;">
       <div class="results-card">
-        <h3>Your Consistency Report</h3>
+        <h3>Your Consistency Report <span id="exp-results-turns-badge" class="turns-badge"></span></h3>
         <div class="score-grid" id="exp-score-grid"></div>
         <p class="results-note" id="exp-leaderboard-note">Add your result to the leaderboard to compare against baselines.</p>
       </div>
@@ -143,20 +143,48 @@ layout_js: /assets/js/demo.js
 
     <!-- Quick Agent form -->
     <div class="agent-form" id="agent-form-quick" style="display:none;">
+      <div class="litellm-hint">
+        <strong>Model names follow the LiteLLM format.</strong>
+        Use <code>provider/model</code> (e.g. <code>openai/gpt-4o</code>, <code>gemini/gemini-2.5-flash</code>, <code>anthropic/claude-sonnet-4-5</code>, <code>azure/&lt;deployment-name&gt;</code>).
+        See the full list at
+        <a href="https://docs.litellm.ai/docs/providers" target="_blank" rel="noopener">docs.litellm.ai/docs/providers</a>
+        or
+        <a href="https://models.litellm.ai/" target="_blank" rel="noopener">models.litellm.ai</a>.
+        <br><br>
+        <strong>Not supported:</strong> providers whose auth isn't a single API key string.
+        Examples:
+        <code>bedrock/*</code> (needs AWS access key + secret + region),
+        <code>vertex_ai/*</code> (needs a service-account JSON file),
+        and any other provider relying on credential chains or env vars beyond a single key.
+        If you need these, use <strong>Connect External Agent</strong> mode and host the agent yourself.
+      </div>
       <div class="form-row">
         <div class="form-group" style="flex:1;">
           <label for="quick-agent-name">Agent Name <span class="label-hint">(required)</span></label>
           <input type="text" id="quick-agent-name" placeholder="e.g. MyPersonaBot v2">
         </div>
         <div class="form-group" style="flex:1;">
-          <label for="quick-agent-model">Model <span class="label-hint">(required)</span></label>
-          <input type="text" id="quick-agent-model" placeholder="e.g. gpt-4o, gemini/gemini-2.5-flash">
+          <label for="quick-agent-model">Model <span class="label-hint">(required — LiteLLM format)</span></label>
+          <input type="text" id="quick-agent-model" placeholder="e.g. openai/gpt-4o, gemini/gemini-2.5-flash, azure/my-deploy">
         </div>
       </div>
       <div class="form-group">
         <label for="quick-agent-api-key">API Key <span class="label-hint">(required — covers your agent's LLM inference cost only)</span></label>
-        <input type="password" id="quick-agent-api-key" placeholder="Your API key (e.g. OpenAI, Gemini)">
+        <input type="password" id="quick-agent-api-key" placeholder="Your API key (e.g. OpenAI, Gemini, Azure)">
       </div>
+      <details class="advanced-fields">
+        <summary>Advanced (Azure, custom endpoints, local models)</summary>
+        <div class="form-row" style="margin-top:0.75rem;">
+          <div class="form-group" style="flex:2;">
+            <label for="quick-agent-api-base">API Base URL <span class="label-hint">(optional)</span></label>
+            <input type="url" id="quick-agent-api-base" placeholder="e.g. https://myresource.openai.azure.com, http://localhost:8000/v1">
+          </div>
+          <div class="form-group" style="flex:1;">
+            <label for="quick-agent-api-version">API Version <span class="label-hint">(Azure only)</span></label>
+            <input type="text" id="quick-agent-api-version" placeholder="e.g. 2024-02-15-preview">
+          </div>
+        </div>
+      </details>
       <div class="form-group">
         <label for="quick-agent-persona">Persona / System Prompt <span class="label-hint">(required)</span></label>
         <textarea id="quick-agent-persona" rows="5" placeholder="Paste the system prompt that defines your agent's persona. This is sent as the system message and also used by PICon for evaluation."></textarea>
@@ -186,7 +214,7 @@ layout_js: /assets/js/demo.js
     <div id="agent-log" style="display:none;">
       <div class="agent-terminal">
         <div class="terminal-header">
-          <span class="terminal-title">PICon Evaluation</span>
+          <span class="terminal-title">PICon Evaluation <span id="agent-turns-badge" class="turns-badge"></span></span>
           <span class="chat-progress" id="agent-progress">Initializing...</span>
         </div>
         <pre class="terminal-body" id="agent-terminal-body"></pre>
@@ -197,7 +225,7 @@ layout_js: /assets/js/demo.js
     <!-- Agent results -->
     <div id="agent-results" style="display:none;">
       <div class="results-card">
-        <h3>Evaluation Report</h3>
+        <h3>Evaluation Report <span id="agent-results-turns-badge" class="turns-badge"></span></h3>
         <div class="score-grid" id="agent-score-grid"></div>
         <p class="results-note" id="agent-leaderboard-note">Add your result to the leaderboard to compare against baselines.</p>
       </div>

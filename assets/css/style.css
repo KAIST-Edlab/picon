@@ -561,6 +561,53 @@ th { background: var(--color-bg-alt); font-weight: 600; }
   color: var(--color-text-muted);
 }
 
+.turns-badge {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  background: var(--color-bg-alt);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  vertical-align: middle;
+}
+.turns-badge:empty { display: none; }
+
+.litellm-hint {
+  margin-bottom: 1rem;
+  padding: 0.75rem 1rem;
+  background: var(--color-bg-alt);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-accent);
+  border-radius: var(--radius);
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+.litellm-hint code {
+  background: rgba(0,0,0,0.06);
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  font-size: 0.85em;
+}
+.litellm-hint a { color: var(--color-accent); }
+
+.advanced-fields {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0;
+  border-top: 1px dashed var(--color-border);
+}
+.advanced-fields > summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  user-select: none;
+  padding: 0.25rem 0;
+}
+.advanced-fields > summary:hover { color: var(--color-text); }
+
 .chat-messages {
   height: 400px;
   overflow-y: auto;

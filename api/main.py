@@ -471,6 +471,7 @@ class AgentStartRequest(BaseModel):
     model: str = ""
     api_base: Optional[str] = None
     api_key: Optional[str] = None
+    api_version: Optional[str] = None  # for Azure-style providers
     persona: Optional[str] = None
     num_turns: int = 50
     num_sessions: int = 2
@@ -1102,6 +1103,8 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
                 output_dir=f"/tmp/picon_results/{job_id}",
                 **PICON_AGENT_MODELS,
             )
+            if req.api_version:
+                run_kwargs["api_version"] = req.api_version
 
         result_queue = multiprocessing.Queue()
         proc = multiprocessing.Process(

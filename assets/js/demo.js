@@ -177,7 +177,9 @@
 
     expStart.style.display = 'none';
     expChat.style.display = 'block';
-    addMessage(expMessages, 'info', 'Starting interview for ' + name + '...');
+    var expTurnsBadge = document.getElementById('exp-turns-badge');
+    if (expTurnsBadge) expTurnsBadge.textContent = turns + ' turns';
+    addMessage(expMessages, 'info', 'Starting interview for ' + name + ' (' + turns + ' turns chosen)...');
 
     try {
       var res = await fetch(API_BASE + '/api/start', {
@@ -289,6 +291,8 @@
                 var hasScores = evalScores.ic != null || evalScores.ec != null || evalScores.rc != null;
                 var expResultsEl = document.getElementById('exp-results');
                 expResultsEl.style.display = 'block';
+                var expResultsTurnsBadge = document.getElementById('exp-results-turns-badge');
+                if (expResultsTurnsBadge) expResultsTurnsBadge.textContent = document.getElementById('exp-turns').value + ' turns';
                 if (!hasScores) {
                   addMessage(expMessages, 'info', 'Evaluation could not produce scores — the interview may have been too short or was flagged by the AI detector.');
                 }
@@ -403,6 +407,13 @@
     agentTerminal.textContent = '';
     agentLogIndex = 0;
 
+    var agentTurnsBadge = document.getElementById('agent-turns-badge');
+    if (agentTurnsBadge) {
+      var t = payload.num_turns;
+      var s = payload.num_sessions;
+      agentTurnsBadge.textContent = t + ' turns' + (s > 1 ? ' × ' + s + ' sessions' : '');
+    }
+
     appendTerminal('$ picon.evaluate(' + displayLabel + ')\n');
     agentProgress.textContent = 'Starting evaluation...';
 
@@ -453,13 +464,19 @@
     var persona = document.getElementById('quick-agent-persona').value.trim();
     var turns = document.getElementById('quick-agent-turns').value;
     var sessions = document.getElementById('quick-agent-sessions').value;
+    var apiBase = document.getElementById('quick-agent-api-base').value.trim();
+    var apiVersion = document.getElementById('quick-agent-api-version').value.trim();
 
     if (!name) { alert('Please provide an agent name.'); return; }
-    if (!model) { alert('Please provide a model name (e.g. gpt-4o, gemini/gemini-2.5-flash).'); return; }
+    if (!model) { alert('Please provide a model name in LiteLLM format (e.g. openai/gpt-4o, gemini/gemini-2.5-flash).'); return; }
     if (!apiKey) { alert('Please provide an API key. This covers your agent\'s LLM inference cost only — PICon evaluation cost is on us.'); return; }
     if (!persona) { alert('Please provide a persona / system prompt.'); return; }
+    if (model.toLowerCase().indexOf('azure/') === 0 && !apiBase) {
+      alert('Azure models require an API Base URL. Expand "Advanced" and fill in your Azure endpoint.');
+      return;
+    }
 
-    startAgentEvaluation({
+    var payload = {
       mode: 'quick',
       name: name,
       model: model,
@@ -467,7 +484,11 @@
       persona: persona,
       num_turns: parseInt(turns),
       num_sessions: parseInt(sessions),
-    }, name + ', model=' + model + ', turns=' + turns);
+    };
+    if (apiBase) payload.api_base = apiBase;
+    if (apiVersion) payload.api_version = apiVersion;
+
+    startAgentEvaluation(payload, name + ', model=' + model + ', turns=' + turns);
   });
 
   function appendTerminal(text) {
@@ -563,6 +584,12 @@
           if (results) {
             document.getElementById('agent-log').style.display = 'none';
             document.getElementById('agent-results').style.display = 'block';
+            var agentResultsTurnsBadge = document.getElementById('agent-results-turns-badge');
+            if (agentResultsTurnsBadge) {
+              var rt = document.getElementById(activeSubmode === 'external' ? 'ext-agent-turns' : 'quick-agent-turns').value;
+              var rs = document.getElementById(activeSubmode === 'external' ? 'ext-agent-sessions' : 'quick-agent-sessions').value;
+              agentResultsTurnsBadge.textContent = rt + ' turns' + (parseInt(rs) > 1 ? ' × ' + rs + ' sessions' : '');
+            }
             renderScoreGrid(
               document.getElementById('agent-score-grid'),
               results.scores || {}
