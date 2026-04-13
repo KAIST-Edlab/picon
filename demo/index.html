@@ -151,12 +151,12 @@ layout_js: /assets/js/demo.js
         or
         <a href="https://models.litellm.ai/" target="_blank" rel="noopener">models.litellm.ai</a>.
         <br><br>
-        <strong>Not supported:</strong> providers whose auth isn't a single API key string.
-        Examples:
-        <code>bedrock/*</code> (needs AWS access key + secret + region),
-        <code>vertex_ai/*</code> (needs a service-account JSON file),
-        and any other provider relying on credential chains or env vars beyond a single key.
-        If you need these, use <strong>Connect External Agent</strong> mode and host the agent yourself.
+        <strong>Providers that need more than a single API key</strong> (e.g. <code>bedrock/*</code> needs AWS access key + secret + region;
+        <code>azure/*</code> needs an endpoint + version): expand <strong>Advanced</strong> and use the <em>API Base URL</em>, <em>API Version</em>,
+        and <em>Extra Environment Variables</em> fields.
+        <br><br>
+        <strong>Not supported:</strong> providers that authenticate via a credential file on disk (e.g. <code>vertex_ai/*</code> with a
+        service-account JSON). For these, use <strong>Connect External Agent</strong> mode and host the agent yourself.
       </div>
       <div class="form-row">
         <div class="form-group" style="flex:1;">
@@ -189,7 +189,7 @@ layout_js: /assets/js/demo.js
           <textarea id="quick-agent-extra-env" rows="4" placeholder="AWS_ACCESS_KEY_ID=AKIA...&#10;AWS_SECRET_ACCESS_KEY=...&#10;AWS_REGION_NAME=us-east-1"></textarea>
           <div class="label-hint" style="margin-top:0.25rem;">
             Useful for providers like Bedrock (AWS_*), Azure (AZURE_*), or any LiteLLM provider that reads credentials from env vars.
-            Reserved names (<code>OPENAI_API_KEY</code>, <code>GEMINI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, server config) are blocked for safety.
+            Reserved names (<code>OPENAI_API_KEY</code>, <code>GEMINI_API_KEY</code>, server config) are blocked for safety.
           </div>
         </div>
       </details>

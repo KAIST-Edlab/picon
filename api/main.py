@@ -487,7 +487,7 @@ class AgentStartRequest(BaseModel):
 _EXTRA_ENV_DENYLIST = {
     # Picon evaluator / search keys (server-owned)
     "OPENAI_API_KEY", "OPENAI_API_KEYS",
-    "GEMINI_API_KEY", "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
     "SERPER_API_KEY", "TAVILY_API_KEY",
     # Server config
     "BRIDGE_BASE_URL", "MAX_CONCURRENT_JOBS",
@@ -984,7 +984,7 @@ async def agent_start(req: AgentStartRequest, request: Request):
         # Extra safety: if the model is a first-party cloud provider that we
         # have server-side keys for, litellm could fall back to our keys even
         # when user supplied extra_env. Require an explicit api_key for these.
-        leech_prefixes = ("openai/", "gemini/", "anthropic/")
+        leech_prefixes = ("openai/", "gemini/")
         if not req.api_key and req.model.lower().startswith(leech_prefixes):
             raise HTTPException(
                 status_code=400,
