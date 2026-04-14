@@ -103,9 +103,24 @@ MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "60"))
 # single Ollama instance serving 4+ concurrent interrogation sessions).
 JOB_TIMEOUT = int(os.getenv("JOB_TIMEOUT", "3600"))  # 60 minutes soft deadline
 # Hard deadline: after this, we really terminate the subprocess. Must be >= JOB_TIMEOUT.
-JOB_HARD_TIMEOUT = int(os.getenv("JOB_HARD_TIMEOUT", str(JOB_TIMEOUT + 1800)))  # +30 min grace
+JOB_HARD_TIMEOUT = int(os.getenv("JOB_HARD_TIMEOUT", str(JOB_TIMEOUT + 7200)))  # +2h grace
+# Once the human has answered the last interview turn, picon enters its eval phase.
+# The eval phase gets its OWN budget so a slow interview doesn't eat its time.
+EVAL_TIMEOUT = int(os.getenv("EVAL_TIMEOUT", "900"))  # 15 min for eval after interview
 # Experience Mode: if browser stops polling for this many seconds, consider abandoned
 EXPERIENCE_ABANDON_TIMEOUT = int(os.getenv("EXPERIENCE_ABANDON_TIMEOUT", "120"))  # 2 minutes
+
+
+def _hard_kill(proc, grace: float = 5.0):
+    """SIGTERM, then SIGKILL if the subprocess hasn't exited within `grace` seconds.
+    picon workers can be wedged inside an LLM HTTP call and ignore SIGTERM."""
+    if not proc or not proc.is_alive():
+        return
+    proc.terminate()
+    proc.join(grace)
+    if proc.is_alive():
+        proc.kill()
+        proc.join(grace)
 _job_semaphore: Optional[asyncio.Semaphore] = None
 _queued_job_ids: list = []  # ordered list of waiting job IDs for position tracking
 _queue_lock: Optional[asyncio.Lock] = None
@@ -339,9 +354,7 @@ def _cancel_job_over_budget(job_id: str, scope: str, total: float, limit: float)
     job["status"] = "cancelled"
     job["is_complete"] = True
     job["error"] = msg
-    proc = job.get("process")
-    if proc and proc.is_alive():
-        proc.terminate()
+    _hard_kill(job.get("process"))
     logger.warning("Job %s cancelled — %s", job_id, msg)
 
 # Agent model configuration for picon pipeline
@@ -632,6 +645,7 @@ async def experience_start(req: ExperienceStartRequest, request: Request):
         "key_idx": -1,
         "last_poll_time": time.time(),
         "started_at": time.time(),
+        "eval_started_at": None,
     }
     sessions[session_id] = session
 
@@ -728,6 +742,23 @@ async def experience_respond(req: ExperienceRespondRequest):
 
     # Put human's response in the queue for picon to pick up
     session["response_queue"].put(req.response)
+
+    # If this was the last interview turn, mark the eval phase as starting NOW so
+    # the eval gets its own EVAL_TIMEOUT budget instead of inheriting whatever's
+    # left of JOB_HARD_TIMEOUT after a slow interview. turn_count is incremented
+    # by the bridge endpoint each time picon ASKS — so once it's reached picon_turns,
+    # picon has asked the final question and the human's current response is the last.
+    picon_turns = session.get("picon_turns", 0)
+    if (
+        session.get("eval_started_at") is None
+        and picon_turns
+        and session.get("turn_count", 0) >= picon_turns
+    ):
+        session["eval_started_at"] = time.time()
+        logger.info(
+            "Experience %s final response received (turn %d/%d) — eval phase started",
+            req.session_id, session.get("turn_count", 0), picon_turns,
+        )
 
     # Wait for picon to process and produce the next question (or finish).
     # Under heavy load LLM calls can be slow, so we retry with a long total deadline
@@ -889,25 +920,37 @@ async def _run_experience_session(
         session["process"] = proc
         proc.start()
 
-        # Drain results from the subprocess
+        # Drain results from the subprocess. eval_started_at is set by /api/respond
+        # when the human submits their final answer (see experience_respond).
         job_start = session.get("started_at", time.time())
         while proc.is_alive() or not result_queue.empty():
-            # Hard job timeout — only terminate after the hard deadline. We let the
-            # subprocess keep running past the soft deadline in case it's almost done.
-            if time.time() - job_start > JOB_HARD_TIMEOUT:
-                logger.warning("Experience %s HARD timeout after %ds", session_id, JOB_HARD_TIMEOUT)
-                if proc.is_alive():
-                    proc.terminate()
+            eval_started = session.get("eval_started_at")
+            if eval_started is not None:
+                # Eval phase has its own deadline that started when the last response came in.
+                if time.time() - eval_started > EVAL_TIMEOUT:
+                    logger.warning("Experience %s EVAL timeout after %ds", session_id, EVAL_TIMEOUT)
+                    await asyncio.to_thread(_hard_kill, proc)
+                    session["status"] = "error"
+                    session["error"] = "Evaluation timed out"
+                    session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
+                    break
+            elif time.time() - job_start > JOB_HARD_TIMEOUT:
+                # Interview phase exceeded the hard cap.
+                logger.warning("Experience %s INTERVIEW HARD timeout after %ds", session_id, JOB_HARD_TIMEOUT)
+                await asyncio.to_thread(_hard_kill, proc)
                 session["status"] = "error"
-                session["error"] = "Session timed out"
+                session["error"] = "Interview timed out"
                 session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
                 break
-            # Check browser abandon
+            # Check browser abandon — only meaningful during interview (eval doesn't poll).
             last_poll = session.get("last_poll_time", time.time())
-            if session["status"] == "running" and time.time() - last_poll > EXPERIENCE_ABANDON_TIMEOUT:
+            if (
+                eval_started is None
+                and session["status"] == "running"
+                and time.time() - last_poll > EXPERIENCE_ABANDON_TIMEOUT
+            ):
                 logger.warning("Experience %s abandoned (no browser activity for %ds)", session_id, EXPERIENCE_ABANDON_TIMEOUT)
-                if proc.is_alive():
-                    proc.terminate()
+                await asyncio.to_thread(_hard_kill, proc)
                 session["status"] = "error"
                 session["error"] = "Session abandoned"
                 session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
@@ -946,15 +989,13 @@ async def _run_experience_session(
                 session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
 
     except asyncio.CancelledError:
-        if proc and proc.is_alive():
-            proc.terminate()
+        await asyncio.to_thread(_hard_kill, proc)
         session["status"] = "cancelled"
         session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
 
     except Exception as e:
         logger.exception("Experience session error for %s", name)
-        if proc and proc.is_alive():
-            proc.terminate()
+        await asyncio.to_thread(_hard_kill, proc)
         session["status"] = "error"
         session["error"] = str(e)
         session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
@@ -1110,21 +1151,21 @@ async def agent_logs(job_id: str, since: int = 0):
 async def agent_cancel(job_id: str):
     """Cancel a running agent evaluation.
 
-    The background task's own try/finally handles semaphore and key release
-    when the asyncio.Task is cancelled, so we just cancel the task here.
+    Terminates the picon subprocess first (otherwise it keeps burning the
+    user's API key until the full run finishes), then cancels the asyncio
+    task so its try/finally releases the semaphore and IP budget.
     """
     job = agent_jobs.get(job_id)
     if job:
+        proc = job.get("process")
+        if proc and proc.is_alive():
+            # Offload join() so we don't block the event loop.
+            await asyncio.get_running_loop().run_in_executor(None, _hard_kill, proc)
         task = job.get("task")
         if task and not task.done():
             task.cancel()
-        else:
-            # Task already finished — just mark it
-            proc = job.get("process")
-            if proc and proc.is_alive():
-                proc.terminate()
-            job["status"] = "cancelled"
-            job["is_complete"] = True
+        job["status"] = "cancelled"
+        job["is_complete"] = True
     return {"status": "cancelled"}
 
 
@@ -1213,8 +1254,7 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
             # Hard deadline: really kill the subprocess and give up.
             if elapsed > JOB_HARD_TIMEOUT:
                 logger.warning("Job %s HARD timeout after %ds — terminating", job_id, int(elapsed))
-                if proc.is_alive():
-                    proc.terminate()
+                await asyncio.to_thread(_hard_kill, proc)
                 job["status"] = "error"
                 job["is_complete"] = True
                 job["error"] = f"Job timed out after {JOB_HARD_TIMEOUT}s"
@@ -1290,15 +1330,13 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
                 job["error"] = payload
 
     except asyncio.CancelledError:
-        if proc and proc.is_alive():
-            proc.terminate()
+        await asyncio.to_thread(_hard_kill, proc)
         job["status"] = "cancelled"
         job["is_complete"] = True
 
     except Exception as e:
         logger.exception("Agent eval error for %s", req.name)
-        if proc and proc.is_alive():
-            proc.terminate()
+        await asyncio.to_thread(_hard_kill, proc)
         job["status"] = "error"
         job["is_complete"] = True
         job["error"] = str(e)
@@ -1539,9 +1577,7 @@ async def admin_cleanup():
             task = session.get("task")
             if task and not task.done():
                 task.cancel()
-            proc = session.get("process")
-            if proc and proc.is_alive():
-                proc.terminate()
+            await asyncio.to_thread(_hard_kill, session.get("process"))
             session["status"] = "cancelled"
             session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
             cleaned["experience"].append(sid[:8])
@@ -1555,9 +1591,7 @@ async def admin_cleanup():
             task = job.get("task")
             if task and not task.done():
                 task.cancel()
-            proc = job.get("process")
-            if proc and proc.is_alive():
-                proc.terminate()
+            await asyncio.to_thread(_hard_kill, job.get("process"))
             job["status"] = "cancelled"
             job["is_complete"] = True
             cleaned["agent"].append(jid[:8])
