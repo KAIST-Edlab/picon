@@ -186,9 +186,9 @@ layout_js: /assets/js/demo.js
         </div>
         <div class="form-group">
           <label for="quick-agent-extra-env">Extra Environment Variables <span class="label-hint">(optional — one KEY=value per line)</span></label>
-          <textarea id="quick-agent-extra-env" rows="4" placeholder="AWS_BEARER_TOKEN_BEDROCK=...&#10;AWS_REGION_NAME=us-east-1"></textarea>
+          <textarea id="quick-agent-extra-env" rows="4" placeholder="AWS_ACCESS_KEY_ID=AKIA...&#10;AWS_SECRET_ACCESS_KEY=...&#10;AWS_REGION_NAME=us-east-1"></textarea>
           <div class="label-hint" style="margin-top:0.25rem;">
-            Useful for providers like Bedrock (<code>AWS_BEARER_TOKEN_BEDROCK</code>), SageMaker (<code>AWS_ACCESS_KEY_ID</code> / <code>AWS_SECRET_ACCESS_KEY</code> / <code>AWS_REGION_NAME</code>), or any LiteLLM provider that reads credentials from env vars.
+            Useful for providers like SageMaker (<code>AWS_ACCESS_KEY_ID</code> / <code>AWS_SECRET_ACCESS_KEY</code> / <code>AWS_REGION_NAME</code>) or any LiteLLM provider that reads credentials from env vars.
             <strong>For Azure, don't use this field</strong> — use the <em>API Key</em> / <em>API Base URL</em> / <em>API Version</em> fields above instead
             (<code>AZURE_*</code> env vars are reserved for the evaluator and will be overwritten).
             Reserved names (<code>OPENAI_API_KEY</code>, <code>GEMINI_API_KEY</code>, server config) are blocked for safety.

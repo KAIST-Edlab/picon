@@ -391,6 +391,8 @@
       activeSubmode = card.dataset.submode;
       document.getElementById('agent-form-external').style.display = activeSubmode === 'external' ? 'flex' : 'none';
       document.getElementById('agent-form-quick').style.display = activeSubmode === 'quick' ? 'flex' : 'none';
+      // Clear any stale results card from the other submode's previous run.
+      document.getElementById('agent-results').style.display = 'none';
     });
   });
 
@@ -651,6 +653,10 @@
     document.getElementById('agent-submode-selector').style.display = '';
     document.getElementById('agent-form-external').style.display = activeSubmode === 'external' ? 'flex' : 'none';
     document.getElementById('agent-form-quick').style.display = activeSubmode === 'quick' ? 'flex' : 'none';
+    // Hide any stale results card from a previous run — otherwise the user sees
+    // an empty "Evaluation Report — 50 turns" with "—" placeholders before they
+    // start a new run.
+    document.getElementById('agent-results').style.display = 'none';
   }
 
   // Cancel button
