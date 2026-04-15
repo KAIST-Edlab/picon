@@ -717,6 +717,7 @@ th { background: var(--color-bg-alt); font-weight: 600; }
 .agent-terminal .log-instruction { color: #c586c0; }
 .agent-terminal .log-question { color: #4ec9b0; font-weight: 600; }
 .agent-terminal .log-error { color: #f48771; font-weight: 600; }
+.agent-terminal .log-status { color: #dcdcaa; font-style: italic; }
 /* Internal-detail entries (ACTION Extractor, TOOL OUTPUT) — hidden by default.
    Toggled in bulk via the .show-details class on .terminal-body. */
 .agent-terminal .terminal-body .log-detail { display: none; }

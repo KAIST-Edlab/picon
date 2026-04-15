@@ -548,6 +548,10 @@
   // timestamp like "06:04:36". Anything else is a continuation of the prior line.
   var LOG_LEVEL_RE = /^(INFO|WARNING|WARN|ERROR|DEBUG|CRITICAL):|^\d{1,2}:\d{2}:\d{2}/;
   var ERROR_LINE_RE = /(ERROR|CRITICAL):/;
+  // Progress/status messages from picon (no bracket tag) — surface so the user
+  // can see lifecycle activity ("Running evaluation for...", "Starting...", etc.)
+  // and isn't left wondering whether the process has stalled.
+  var STATUS_LINE_RE = /^INFO:root:(Running|Starting|Completed|Finished|Initializing|Loading|Beginning|Saving|Evaluating)/i;
   var lastDisplayedEntry = null;  // last DOM element we wrote to, for multiline append
 
   function appendLogLine(line) {
@@ -573,6 +577,18 @@
       errEl.textContent = line;
       agentTerminal.appendChild(errEl);
       lastDisplayedEntry = errEl;
+      agentTerminal.scrollTop = agentTerminal.scrollHeight;
+      return;
+    }
+
+    // Lifecycle/progress status messages from picon (no bracket tag).
+    if (STATUS_LINE_RE.test(line) && !LOG_TAG_RE.test(line)) {
+      savedLogLines.push(line);
+      var statusEl = document.createElement('div');
+      statusEl.className = 'log-entry log-status';
+      statusEl.textContent = line.replace(/^INFO:root:/, '');
+      agentTerminal.appendChild(statusEl);
+      lastDisplayedEntry = statusEl;
       agentTerminal.scrollTop = agentTerminal.scrollHeight;
       return;
     }
