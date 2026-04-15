@@ -384,6 +384,8 @@
   var pendingLeaderboardEntry = null;
   var savedLogLines = [];  // filtered log lines for download
   var currentAgentLabel = '';
+  var cancelAgentPoll = null;  // set by pollAgentProgress, called by Cancel
+  var agentCancelled = false;  // set true on cancel; suppresses results render
 
   // Submode switching
   document.querySelectorAll('.agent-submode-card').forEach(function (card) {
@@ -412,6 +414,7 @@
     agentLogIndex = 0;
     savedLogLines = [];
     currentAgentLabel = displayLabel;
+    agentCancelled = false;
     var saveLogBtn = document.getElementById('agent-save-log-btn');
     if (saveLogBtn) saveLogBtn.style.display = 'none';
     var cancelBtnEl = document.getElementById('agent-cancel-btn');
@@ -537,9 +540,20 @@
     agentTerminal.scrollTop = agentTerminal.scrollHeight;
   }
 
-  var LOG_TAG_RE = /\[(RESPONSE|ACTION|CONFIRMATION QUESTION|REPEAT QUESTION|TOOL OUTPUT)\]([\s\S]*)/;
+  var LOG_TAG_RE = /\[(RESPONSE|ACTION|CONFIRMATION QUESTION|REPEAT QUESTION|TOOL OUTPUT|INSTRUCTION)\]([\s\S]*)/;
+  var ERROR_LINE_RE = /(ERROR|CRITICAL):/;
 
   function appendLogLine(line) {
+    // Always surface error-level logs even if no recognized tag.
+    if (ERROR_LINE_RE.test(line) && !LOG_TAG_RE.test(line)) {
+      savedLogLines.push(line);
+      var errEl = document.createElement('div');
+      errEl.className = 'log-entry log-error';
+      errEl.textContent = line;
+      agentTerminal.appendChild(errEl);
+      agentTerminal.scrollTop = agentTerminal.scrollHeight;
+      return;
+    }
     var m = line.match(LOG_TAG_RE);
     if (!m) return;  // filter out all other log levels
     var tag = m[1];
@@ -601,6 +615,7 @@
       stopped = true;
       clearInterval(interval);
     }
+    cancelAgentPoll = stop;
 
     var interval = setInterval(async function () {
       if (stopped) return;
@@ -634,6 +649,7 @@
 
         if (data.is_complete) {
           stop();
+          if (agentCancelled) return;  // user clicked Cancel — don't render results
 
           // Fetch final logs
           await fetchAgentLogs(sessionId);
@@ -718,19 +734,27 @@
     document.getElementById('agent-results').style.display = 'none';
   }
 
-  // Cancel button
+  // Cancel button — must respond synchronously. We mark cancelled, stop the
+  // poller, hide the UI, then fire-and-forget the DELETE so the user doesn't
+  // wait 3-5s for the server to kill the subprocess.
   var cancelBtn = document.getElementById('agent-cancel-btn');
   if (cancelBtn) {
-    cancelBtn.addEventListener('click', async function () {
-      if (agentSessionId && API_BASE) {
-        try { await fetch(API_BASE + '/api/agent/cancel/' + agentSessionId, { method: 'DELETE' }); }
-        catch (e) { /* ignore */ }
+    cancelBtn.addEventListener('click', function () {
+      agentCancelled = true;
+      if (typeof cancelAgentPoll === 'function') cancelAgentPoll();
+      var sid = agentSessionId;
+      if (sid && API_BASE) {
+        // Fire-and-forget
+        fetch(API_BASE + '/api/agent/cancel/' + sid, { method: 'DELETE' })
+          .catch(function () { /* ignore */ });
       }
       document.getElementById('agent-log').style.display = 'none';
+      document.getElementById('agent-results').style.display = 'none';
       showAgentForm();
       agentTerminal.innerHTML = '';
       agentLogIndex = 0;
       savedLogLines = [];
+      agentSessionId = null;
     });
   }
 
