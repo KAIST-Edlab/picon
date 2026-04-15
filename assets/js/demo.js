@@ -382,6 +382,8 @@
   var agentLogIndex = 0;  // track how many log lines we've fetched
   var activeSubmode = 'external';
   var pendingLeaderboardEntry = null;
+  var savedLogLines = [];  // filtered log lines for download
+  var currentAgentLabel = '';
 
   // Submode switching
   document.querySelectorAll('.agent-submode-card').forEach(function (card) {
@@ -406,8 +408,14 @@
     document.getElementById('agent-form-external').style.display = 'none';
     document.getElementById('agent-form-quick').style.display = 'none';
     document.getElementById('agent-log').style.display = 'block';
-    agentTerminal.textContent = '';
+    agentTerminal.innerHTML = '';
     agentLogIndex = 0;
+    savedLogLines = [];
+    currentAgentLabel = displayLabel;
+    var saveLogBtn = document.getElementById('agent-save-log-btn');
+    if (saveLogBtn) saveLogBtn.style.display = 'none';
+    var cancelBtnEl = document.getElementById('agent-cancel-btn');
+    if (cancelBtnEl) cancelBtnEl.style.display = '';
 
     var agentTurnsBadge = document.getElementById('agent-turns-badge');
     if (agentTurnsBadge) {
@@ -516,7 +524,54 @@
   });
 
   function appendTerminal(text) {
-    agentTerminal.textContent += text;
+    // System/status messages — always shown, not filtered.
+    var lines = text.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (i === lines.length - 1 && line === '') continue;
+      var el = document.createElement('div');
+      el.className = 'log-entry log-system';
+      el.textContent = line;
+      agentTerminal.appendChild(el);
+    }
+    agentTerminal.scrollTop = agentTerminal.scrollHeight;
+  }
+
+  var LOG_TAG_RE = /\[(RESPONSE|ACTION|CONFIRMATION QUESTION|REPEAT QUESTION|TOOL OUTPUT)\]([\s\S]*)/;
+
+  function appendLogLine(line) {
+    var m = line.match(LOG_TAG_RE);
+    if (!m) return;  // filter out all other log levels
+    var tag = m[1];
+    var rest = m[2];
+    var fullTag = tag;
+    if (tag === 'ACTION') {
+      var am = rest.match(/^\s*(Extractor|Questioner)/);
+      if (!am) return;
+      fullTag = 'ACTION ' + am[1];
+    }
+    var display = '[' + fullTag + ']' + rest;
+    savedLogLines.push(display);
+
+    var collapsible = (fullTag === 'ACTION Extractor' || fullTag === 'TOOL OUTPUT');
+    var cssSuffix = fullTag.toLowerCase().replace(/\s+/g, '-');
+    var el;
+    if (collapsible) {
+      el = document.createElement('details');
+      el.className = 'log-entry log-collapsible log-' + cssSuffix;
+      var sum = document.createElement('summary');
+      sum.textContent = '[' + fullTag + ']';
+      el.appendChild(sum);
+      var body = document.createElement('div');
+      body.className = 'log-entry-body';
+      body.textContent = rest.replace(/^\s*(Extractor|Questioner)\s*/, '').trim() || rest.trim();
+      el.appendChild(body);
+    } else {
+      el = document.createElement('div');
+      el.className = 'log-entry log-' + cssSuffix;
+      el.textContent = display;
+    }
+    agentTerminal.appendChild(el);
     agentTerminal.scrollTop = agentTerminal.scrollHeight;
   }
 
@@ -526,7 +581,7 @@
       if (!res.ok) return;
       var data = await res.json();
       if (data.lines && data.lines.length > 0) {
-        appendTerminal(data.lines.join('\n') + '\n');
+        for (var i = 0; i < data.lines.length; i++) appendLogLine(data.lines[i]);
         agentLogIndex = data.total;
       }
     } catch (e) { /* ignore */ }
@@ -606,7 +661,11 @@
           }
 
           if (results) {
-            document.getElementById('agent-log').style.display = 'none';
+            // Keep the conversation log visible alongside the results.
+            var cancelBtnEl2 = document.getElementById('agent-cancel-btn');
+            if (cancelBtnEl2) cancelBtnEl2.style.display = 'none';
+            var saveLogBtn2 = document.getElementById('agent-save-log-btn');
+            if (saveLogBtn2) saveLogBtn2.style.display = '';
             document.getElementById('agent-results').style.display = 'block';
             var agentResultsTurnsBadge = document.getElementById('agent-results-turns-badge');
             if (agentResultsTurnsBadge) {
@@ -669,8 +728,28 @@
       }
       document.getElementById('agent-log').style.display = 'none';
       showAgentForm();
-      agentTerminal.textContent = '';
+      agentTerminal.innerHTML = '';
       agentLogIndex = 0;
+      savedLogLines = [];
+    });
+  }
+
+  // Save log button — downloads filtered conversation log as .txt
+  var saveLogBtn = document.getElementById('agent-save-log-btn');
+  if (saveLogBtn) {
+    saveLogBtn.addEventListener('click', function () {
+      var header = 'PICon Evaluation Log\n' + (currentAgentLabel ? currentAgentLabel + '\n' : '') +
+        'Generated: ' + new Date().toISOString() + '\n' + '='.repeat(60) + '\n\n';
+      var blob = new Blob([header + savedLogLines.join('\n') + '\n'], { type: 'text/plain' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      var stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      a.download = 'picon-log-' + stamp + '.txt';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 0);
     });
   }
 
@@ -693,6 +772,7 @@
   if (retryBtn) {
     retryBtn.addEventListener('click', function () {
       document.getElementById('agent-results').style.display = 'none';
+      document.getElementById('agent-log').style.display = 'none';
       if (submitLbBtn) {
         submitLbBtn.disabled = false;
         submitLbBtn.textContent = 'Submit to Leaderboard';
@@ -701,8 +781,9 @@
         'Add your result to the leaderboard to compare against baselines.';
       pendingLeaderboardEntry = null;
       showAgentForm();
-      agentTerminal.textContent = '';
+      agentTerminal.innerHTML = '';
       agentLogIndex = 0;
+      savedLogLines = [];
     });
   }
 

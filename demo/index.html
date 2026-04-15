@@ -227,9 +227,12 @@ layout_js: /assets/js/demo.js
           <span class="terminal-title">PICon Evaluation <span id="agent-turns-badge" class="turns-badge"></span></span>
           <span class="chat-progress" id="agent-progress">Initializing...</span>
         </div>
-        <pre class="terminal-body" id="agent-terminal-body"></pre>
+        <div class="terminal-body" id="agent-terminal-body"></div>
       </div>
-      <button class="btn btn-secondary" id="agent-cancel-btn" style="margin-top:0.75rem;">Cancel</button>
+      <div style="margin-top:0.75rem; display:flex; gap:0.5rem; flex-wrap:wrap;">
+        <button class="btn btn-secondary" id="agent-cancel-btn">Cancel</button>
+        <button class="btn btn-secondary" id="agent-save-log-btn" style="display:none;">Save Log (.txt)</button>
+      </div>
     </div>
 
     <!-- Agent results -->

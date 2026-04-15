@@ -706,6 +706,27 @@ th { background: var(--color-bg-alt); font-weight: 600; }
   word-break: break-word;
 }
 
+.agent-terminal .log-entry {
+  padding: 0.15rem 0;
+}
+.agent-terminal .log-system { color: #888; font-style: italic; }
+.agent-terminal .log-response { color: #d4d4d4; }
+.agent-terminal .log-action-questioner { color: #7ec699; }
+.agent-terminal .log-confirmation-question { color: #d7ba7d; }
+.agent-terminal .log-repeat-question { color: #ce9178; }
+.agent-terminal .log-collapsible > summary {
+  cursor: pointer;
+  color: #6a9fb5;
+  list-style: revert;
+}
+.agent-terminal .log-collapsible[open] > summary { color: #9cdcfe; }
+.agent-terminal .log-entry-body {
+  padding: 0.25rem 0 0.5rem 1rem;
+  color: #b0b0b0;
+  border-left: 2px solid #333;
+  margin-left: 0.25rem;
+}
+
 .chat-input {
   display: flex;
   border-top: 1px solid var(--color-border);
