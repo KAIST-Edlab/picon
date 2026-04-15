@@ -714,18 +714,14 @@ th { background: var(--color-bg-alt); font-weight: 600; }
 .agent-terminal .log-action-questioner { color: #7ec699; }
 .agent-terminal .log-confirmation-question { color: #d7ba7d; }
 .agent-terminal .log-repeat-question { color: #ce9178; }
-.agent-terminal .log-collapsible > summary {
-  cursor: pointer;
-  color: #6a9fb5;
-  list-style: revert;
-}
-.agent-terminal .log-collapsible[open] > summary { color: #9cdcfe; }
-.agent-terminal .log-entry-body {
-  padding: 0.25rem 0 0.5rem 1rem;
-  color: #b0b0b0;
-  border-left: 2px solid #333;
-  margin-left: 0.25rem;
-}
+.agent-terminal .log-instruction { color: #c586c0; }
+.agent-terminal .log-error { color: #f48771; font-weight: 600; }
+/* Internal-detail entries (ACTION Extractor, TOOL OUTPUT) — hidden by default.
+   Toggled in bulk via the .show-details class on .terminal-body. */
+.agent-terminal .terminal-body .log-detail { display: none; }
+.agent-terminal .terminal-body.show-details .log-detail { display: block; }
+.agent-terminal .log-action-extractor { color: #6a9fb5; }
+.agent-terminal .log-tool-output { color: #b5cea8; }
 
 .chat-input {
   display: flex;

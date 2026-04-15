@@ -415,8 +415,10 @@
     savedLogLines = [];
     currentAgentLabel = displayLabel;
     agentCancelled = false;
+    // Save Log button stays visible throughout — partial logs are useful too,
+    // especially when an eval errors out mid-run.
     var saveLogBtn = document.getElementById('agent-save-log-btn');
-    if (saveLogBtn) saveLogBtn.style.display = 'none';
+    if (saveLogBtn) saveLogBtn.style.display = '';
     var cancelBtnEl = document.getElementById('agent-cancel-btn');
     if (cancelBtnEl) cancelBtnEl.style.display = '';
 
@@ -567,24 +569,15 @@
     var display = '[' + fullTag + ']' + rest;
     savedLogLines.push(display);
 
-    var collapsible = (fullTag === 'ACTION Extractor' || fullTag === 'TOOL OUTPUT');
     var cssSuffix = fullTag.toLowerCase().replace(/\s+/g, '-');
-    var el;
-    if (collapsible) {
-      el = document.createElement('details');
-      el.className = 'log-entry log-collapsible log-' + cssSuffix;
-      var sum = document.createElement('summary');
-      sum.textContent = '[' + fullTag + ']';
-      el.appendChild(sum);
-      var body = document.createElement('div');
-      body.className = 'log-entry-body';
-      body.textContent = rest.replace(/^\s*(Extractor|Questioner)\s*/, '').trim() || rest.trim();
-      el.appendChild(body);
-    } else {
-      el = document.createElement('div');
-      el.className = 'log-entry log-' + cssSuffix;
-      el.textContent = display;
+    var el = document.createElement('div');
+    el.className = 'log-entry log-' + cssSuffix;
+    // ACTION Extractor and TOOL OUTPUT carry the `log-detail` marker so the
+    // global toggle button can hide them in bulk via CSS.
+    if (fullTag === 'ACTION Extractor' || fullTag === 'TOOL OUTPUT') {
+      el.classList.add('log-detail');
     }
+    el.textContent = display;
     agentTerminal.appendChild(el);
     agentTerminal.scrollTop = agentTerminal.scrollHeight;
   }
@@ -657,6 +650,9 @@
           if (data.error) {
             agentProgress.textContent = 'Error';
             appendTerminal('\nERROR: ' + data.error + '\n');
+            // Hide Cancel — eval is already over. Save Log stays visible.
+            var cancelBtnErr = document.getElementById('agent-cancel-btn');
+            if (cancelBtnErr) cancelBtnErr.style.display = 'none';
             return;
           }
 
@@ -680,8 +676,6 @@
             // Keep the conversation log visible alongside the results.
             var cancelBtnEl2 = document.getElementById('agent-cancel-btn');
             if (cancelBtnEl2) cancelBtnEl2.style.display = 'none';
-            var saveLogBtn2 = document.getElementById('agent-save-log-btn');
-            if (saveLogBtn2) saveLogBtn2.style.display = '';
             document.getElementById('agent-results').style.display = 'block';
             var agentResultsTurnsBadge = document.getElementById('agent-results-turns-badge');
             if (agentResultsTurnsBadge) {
@@ -755,6 +749,15 @@
       agentLogIndex = 0;
       savedLogLines = [];
       agentSessionId = null;
+    });
+  }
+
+  // Toggle button — show/hide ACTION Extractor + TOOL OUTPUT entries in bulk.
+  var toggleDetailsBtn = document.getElementById('agent-toggle-details-btn');
+  if (toggleDetailsBtn) {
+    toggleDetailsBtn.addEventListener('click', function () {
+      var on = agentTerminal.classList.toggle('show-details');
+      toggleDetailsBtn.textContent = on ? 'Hide Internal Details' : 'Show Internal Details';
     });
   }
 
