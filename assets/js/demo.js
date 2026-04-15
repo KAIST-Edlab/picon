@@ -623,7 +623,10 @@
     agentTerminal.scrollTop = agentTerminal.scrollHeight;
   }
 
+  var fetchingLogs = false;
   async function fetchAgentLogs(sessionId) {
+    if (fetchingLogs) return;  // prevent overlapping polls from re-rendering the same slice
+    fetchingLogs = true;
     try {
       var res = await fetch(API_BASE + '/api/agent/logs/' + sessionId + '?since=' + agentLogIndex);
       if (!res.ok) return;
@@ -633,6 +636,7 @@
         agentLogIndex = data.total;
       }
     } catch (e) { /* ignore */ }
+    finally { fetchingLogs = false; }
   }
 
   async function pollAgentProgress(sessionId) {
