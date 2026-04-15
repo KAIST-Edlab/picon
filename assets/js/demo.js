@@ -415,6 +415,7 @@
     savedLogLines = [];
     currentAgentLabel = displayLabel;
     agentCancelled = false;
+    lastDisplayedEntry = null;
     // Save Log button stays visible throughout — partial logs are useful too,
     // especially when an eval errors out mid-run.
     var saveLogBtn = document.getElementById('agent-save-log-btn');
@@ -542,28 +543,53 @@
     agentTerminal.scrollTop = agentTerminal.scrollHeight;
   }
 
-  var LOG_TAG_RE = /\[(RESPONSE|ACTION|CONFIRMATION QUESTION|REPEAT QUESTION|TOOL OUTPUT|INSTRUCTION)\]([\s\S]*)/;
+  var LOG_TAG_RE = /\[(RESPONSE|ACTION|CONFIRMATION QUESTION|REPEAT QUESTION|TOOL OUTPUT|INSTRUCTION|QUESTION)\]([\s\S]*)/;
+  // A "new log line" starts with a log-level prefix (INFO:, ERROR:, etc.) or a
+  // timestamp like "06:04:36". Anything else is a continuation of the prior line.
+  var LOG_LEVEL_RE = /^(INFO|WARNING|WARN|ERROR|DEBUG|CRITICAL):|^\d{1,2}:\d{2}:\d{2}/;
   var ERROR_LINE_RE = /(ERROR|CRITICAL):/;
+  var lastDisplayedEntry = null;  // last DOM element we wrote to, for multiline append
 
   function appendLogLine(line) {
-    // Always surface error-level logs even if no recognized tag.
+    var isNewLogLine = LOG_LEVEL_RE.test(line);
+
+    // Continuation: append to the last displayed entry (if any).
+    if (!isNewLogLine) {
+      if (lastDisplayedEntry) {
+        lastDisplayedEntry.textContent += '\n' + line;
+        if (savedLogLines.length > 0) {
+          savedLogLines[savedLogLines.length - 1] += '\n' + line;
+        }
+        agentTerminal.scrollTop = agentTerminal.scrollHeight;
+      }
+      return;
+    }
+
+    // New log line — error path first.
     if (ERROR_LINE_RE.test(line) && !LOG_TAG_RE.test(line)) {
       savedLogLines.push(line);
       var errEl = document.createElement('div');
       errEl.className = 'log-entry log-error';
       errEl.textContent = line;
       agentTerminal.appendChild(errEl);
+      lastDisplayedEntry = errEl;
       agentTerminal.scrollTop = agentTerminal.scrollHeight;
       return;
     }
+
     var m = line.match(LOG_TAG_RE);
-    if (!m) return;  // filter out all other log levels
+    if (!m) {
+      // Not displayed — clear continuation target so subsequent lines don't
+      // accidentally append to the previous tagged entry.
+      lastDisplayedEntry = null;
+      return;
+    }
     var tag = m[1];
     var rest = m[2];
     var fullTag = tag;
     if (tag === 'ACTION') {
       var am = rest.match(/^\s*(Extractor|Questioner)/);
-      if (!am) return;
+      if (!am) { lastDisplayedEntry = null; return; }
       fullTag = 'ACTION ' + am[1];
     }
     var display = '[' + fullTag + ']' + rest;
@@ -572,13 +598,12 @@
     var cssSuffix = fullTag.toLowerCase().replace(/\s+/g, '-');
     var el = document.createElement('div');
     el.className = 'log-entry log-' + cssSuffix;
-    // ACTION Extractor and TOOL OUTPUT carry the `log-detail` marker so the
-    // global toggle button can hide them in bulk via CSS.
     if (fullTag === 'ACTION Extractor' || fullTag === 'TOOL OUTPUT') {
       el.classList.add('log-detail');
     }
     el.textContent = display;
     agentTerminal.appendChild(el);
+    lastDisplayedEntry = el;
     agentTerminal.scrollTop = agentTerminal.scrollHeight;
   }
 
