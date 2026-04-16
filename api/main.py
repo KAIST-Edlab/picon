@@ -978,6 +978,9 @@ async def _run_experience_session(
                 session["status"] = "complete"
                 session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
                 logger.info("Experience session complete for %s: %s", name, session["result"])
+                # Stop draining: a hung subprocess past EVAL_TIMEOUT would otherwise
+                # overwrite this success with "Evaluation timed out".
+                break
 
             elif msg_type == "cost":
                 _add_job_cost(session_id, payload)
@@ -987,6 +990,7 @@ async def _run_experience_session(
                 session["status"] = "error"
                 session["error"] = payload
                 session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
+                break
 
     except asyncio.CancelledError:
         await asyncio.to_thread(_hard_kill, proc)
@@ -1003,6 +1007,10 @@ async def _run_experience_session(
     finally:
         if proc:
             proc.join(timeout=5)
+            if proc.is_alive():
+                # Subprocess didn't shut down on its own (e.g. picon hung after
+                # emitting the result). Hard-kill so we don't leak a worker.
+                await asyncio.to_thread(_hard_kill, proc)
         _release_key(key_idx)
         sem.release()
         logger.info("Experience %s released slot + key pool[%d]", session_id, key_idx)
@@ -1322,12 +1330,16 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
                     job["status"] = "failed"
                     job["is_complete"] = True
                     job["error"] = "Evaluation failed" + (" (AI detected)" if result.ai_detected else "")
+                # Stop draining once we've recorded the outcome — see experience_session
+                # for why a hung subprocess past the deadline could otherwise overwrite it.
+                break
 
             elif msg_type == "error":
                 logger.error("Agent eval error for %s: %s", req.name, payload)
                 job["status"] = "error"
                 job["is_complete"] = True
                 job["error"] = payload
+                break
 
     except asyncio.CancelledError:
         await asyncio.to_thread(_hard_kill, proc)
@@ -1344,6 +1356,8 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
     finally:
         if proc:
             proc.join(timeout=5)
+            if proc.is_alive():
+                await asyncio.to_thread(_hard_kill, proc)
         _release_key(key_idx)
         sem.release()
         logger.info("Job %s released slot + key pool[%d] (slots: %d/%d used)", job_id,
