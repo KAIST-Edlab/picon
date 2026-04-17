@@ -98,12 +98,17 @@
     return text.replace(/(https?:\/\/[^\s)<>]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
   }
 
+  function smartScroll(container) {
+    var nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 40;
+    if (nearBottom) container.scrollTop = container.scrollHeight;
+  }
+
   function addMessage(container, type, text) {
     var el = document.createElement('div');
     el.className = 'chat-msg ' + type;
     el.innerHTML = linkify(text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'));
     container.appendChild(el);
-    container.scrollTop = container.scrollHeight;
+    smartScroll(container);
     return el;
   }
 
@@ -112,7 +117,7 @@
     el.className = 'chat-typing';
     el.innerHTML = '<span></span><span></span><span></span>';
     container.appendChild(el);
-    container.scrollTop = container.scrollHeight;
+    smartScroll(container);
     return el;
   }
 
@@ -540,7 +545,7 @@
       el.textContent = line;
       agentTerminal.appendChild(el);
     }
-    agentTerminal.scrollTop = agentTerminal.scrollHeight;
+    smartScroll(agentTerminal);
   }
 
   var LOG_TAG_RE = /\[(RESPONSE|ACTION|CONFIRMATION QUESTION|REPEAT QUESTION|TOOL OUTPUT|INSTRUCTION|QUESTION)\]([\s\S]*)/;
@@ -564,7 +569,7 @@
         if (savedLogLines.length > 0) {
           savedLogLines[savedLogLines.length - 1] += '\n' + line;
         }
-        agentTerminal.scrollTop = agentTerminal.scrollHeight;
+        smartScroll(agentTerminal);
       }
       return;
     }
@@ -577,7 +582,7 @@
       errEl.textContent = line;
       agentTerminal.appendChild(errEl);
       lastDisplayedEntry = errEl;
-      agentTerminal.scrollTop = agentTerminal.scrollHeight;
+      smartScroll(agentTerminal);
       return;
     }
 
@@ -589,7 +594,7 @@
       statusEl.textContent = line.replace(/^INFO:root:/, '');
       agentTerminal.appendChild(statusEl);
       lastDisplayedEntry = statusEl;
-      agentTerminal.scrollTop = agentTerminal.scrollHeight;
+      smartScroll(agentTerminal);
       return;
     }
 
@@ -620,7 +625,7 @@
     el.textContent = display;
     agentTerminal.appendChild(el);
     lastDisplayedEntry = el;
-    agentTerminal.scrollTop = agentTerminal.scrollHeight;
+    smartScroll(agentTerminal);
   }
 
   var fetchingLogs = false;
