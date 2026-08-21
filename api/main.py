@@ -268,6 +268,25 @@ def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict, openai_
 
     import picon
 
+    # Replace picon's static WVS question bank with one generated seed question.
+    # See _generate_seed_question above for why this is a rebinding rather than
+    # an argument. If generation fails we leave run_kwargs untouched, so picon
+    # falls back to its bundled 10-question bank and the interview still runs.
+    try:
+        _seed_dir = run_kwargs.get("output_dir") or "/tmp/picon_results"
+        _seed_path, _seed_q = _generate_seed_question(_seed_dir)
+        import picon.api
+        import picon.config
+        picon.api.get_question_path = lambda: _seed_path
+        picon.config.get_question_path = lambda: _seed_path
+        run_kwargs = {**run_kwargs, "num_get_to_know_q": 1}
+        result_queue.put(("log", f"Seed question: {_seed_q}"))
+    except Exception as _seed_err:
+        result_queue.put((
+            "log",
+            f"Seed-question generation failed ({_seed_err}); falling back to the WVS bank.",
+        ))
+
     try:
         result = picon.run(**run_kwargs)
         result_queue.put(("result", result))
@@ -364,6 +383,96 @@ PICON_AGENT_MODELS = {
     "web_search_model": os.getenv("PICON_WEB_SEARCH_MODEL", "gpt-5"),
     "evaluator_model": os.getenv("PICON_EVALUATOR_MODEL", "gemini/gemini-2.5-flash"),
 }
+
+
+# ---------------------------------------------------------------------------
+# Seed question generation
+# ---------------------------------------------------------------------------
+# picon's get-to-know phase normally replays a fixed 10-question World Values
+# Survey bank. We replace it with a single question generated per run, asking
+# for one concrete fact whose answer names a place, person, institution, or
+# product. A nameable answer gives the interrogation a specific thread to pull
+# on, and dropping from 10 seed questions to 1 leaves more turns for the
+# interrogation itself.
+#
+# picon exposes no hook for this: run() hardcodes question_path=get_question_path()
+# (picon/api.py), so we rebind that name in both namespaces it can resolve
+# through. This runs inside the per-session subprocess, so the rebinding cannot
+# leak into other sessions.
+SEED_QUESTION_MODEL = os.getenv("PICON_SEED_QUESTION_MODEL", "gpt-5")
+
+_SEED_QUESTION_PROMPT = """You write a single opening question for a research interview whose goal is to build an accurate picture of the interviewee.
+
+The question asks for exactly one concrete fact about this person, and the answer should be a nameable thing: a place, a person, an institution, or a product. A nameable answer gives the interviewer something specific to follow up on for the rest of the interview.
+
+Questions of the right kind:
+- Where were you born?
+- Where do you live now?
+- What is the first name of the person you communicate with most often?
+- What is the name of a restaurant or cafe you go to often?
+- If you traveled somewhere recently, where did you go?
+- What was the name of the school you attended?
+- Who was the last friend you saw in person?
+- What is the name of an app you use often?
+
+Write one new question in the same spirit. Do not reuse any of the examples. Keep it plain and short: one sentence, asking for one thing.
+
+Return JSON only: {"question": "...", "expected_answer": "what kind of nameable thing the answer should be"}"""
+
+
+SEED_QUESTION_RETRIES = int(os.getenv("PICON_SEED_QUESTION_RETRIES", "3"))
+
+
+def _generate_seed_question(out_dir: str) -> tuple:
+    """
+    Generate one seed question and write it as a picon question file.
+
+    Retries SEED_QUESTION_RETRIES times: a transient API error or a malformed
+    JSON reply should not silently drop the run back onto the WVS bank. Raises
+    the last error only after every attempt has failed.
+
+    Returns (path, question_text).
+    """
+    import json as _json
+    import time as _time
+    import litellm as _litellm
+
+    _litellm.drop_params = True
+    last_err = None
+    for attempt in range(1, SEED_QUESTION_RETRIES + 1):
+        try:
+            res = _litellm.completion(
+                model=SEED_QUESTION_MODEL,
+                messages=[
+                    {"role": "system", "content": _SEED_QUESTION_PROMPT},
+                    {"role": "user", "content": "Write the question."},
+                ],
+                timeout=120,
+            )
+            raw = (res.choices[0].message.content or "").strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                raw = raw[4:].lstrip() if raw.lower().startswith("json") else raw
+            question = _json.loads(raw)["question"].strip()
+            if not question:
+                raise ValueError("empty question")
+
+            os.makedirs(out_dir, exist_ok=True)
+            path = os.path.join(out_dir, "seed_question.json")
+            with open(path, "w") as f:
+                _json.dump([{"id": "Q_1", "question": question}], f)
+            return path, question
+        except Exception as e:
+            last_err = e
+            logger.warning(
+                "Seed-question generation attempt %d/%d failed: %s",
+                attempt, SEED_QUESTION_RETRIES, e,
+            )
+            if attempt < SEED_QUESTION_RETRIES:
+                _time.sleep(2 * attempt)
+    raise RuntimeError(
+        f"seed-question generation failed after {SEED_QUESTION_RETRIES} attempts: {last_err}"
+    )
 
 
 # ---------------------------------------------------------------------------

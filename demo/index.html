@@ -35,8 +35,8 @@ layout_js: /assets/js/demo.js
       Answer as yourself &mdash; PICon will probe your responses with logically chained follow-ups
       and verify factual claims in real time. At the end, you'll see your consistency scores across
       all three dimensions.
-      A full run is <strong>50 turns</strong> (default), but if you just want a quick taste,
-      try <strong>30 turns</strong> &mdash; the interrogation can take a while!
+      A standard run is <strong>15 turns</strong> (default). Longer runs dig deeper but cost
+      considerably more time, so pick 50 or 75 only if you want the full protocol.
       After all questions are done, evaluation may take an additional 2&ndash;3 minutes.
     </div>
 
@@ -50,9 +50,9 @@ layout_js: /assets/js/demo.js
         <div class="form-group" style="flex:1;">
           <label for="exp-turns">Turns</label>
           <select id="exp-turns">
-            <option value="15">15 turns (debug)</option>
-            <option value="30">30 turns (quick)</option>
-            <option value="50" selected>50 turns (standard)</option>
+            <option value="15" selected>15 turns (standard)</option>
+            <option value="30">30 turns (extended)</option>
+            <option value="50">50 turns (full)</option>
             <option value="75">75 turns (thorough)</option>
           </select>
         </div>
@@ -124,8 +124,9 @@ layout_js: /assets/js/demo.js
         <div class="form-group" style="flex:1;">
           <label for="ext-agent-turns">Interrogation Turns</label>
           <select id="ext-agent-turns">
-            <option value="30">30 turns (quick)</option>
-            <option value="50" selected>50 turns (standard)</option>
+            <option value="15" selected>15 turns (standard)</option>
+            <option value="30">30 turns (extended)</option>
+            <option value="50">50 turns (full)</option>
             <option value="75">75 turns (thorough)</option>
           </select>
         </div>
@@ -203,8 +204,9 @@ layout_js: /assets/js/demo.js
         <div class="form-group" style="flex:1;">
           <label for="quick-agent-turns">Interrogation Turns</label>
           <select id="quick-agent-turns">
-            <option value="30">30 turns (quick)</option>
-            <option value="50" selected>50 turns (standard)</option>
+            <option value="15" selected>15 turns (standard)</option>
+            <option value="30">30 turns (extended)</option>
+            <option value="50">50 turns (full)</option>
             <option value="75">75 turns (thorough)</option>
           </select>
         </div>
@@ -283,6 +285,7 @@ layout_js: /assets/js/demo.js
           <option value="75">75</option>
           <option value="50">50</option>
           <option value="30">30</option>
+          <option value="15">15</option>
         </select>
       </div>
     </div>
