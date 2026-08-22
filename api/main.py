@@ -912,18 +912,21 @@ async def experience_respond(req: ExperienceRespondRequest):
     turn = next_q.get("turn", 0)
     session["progress"]["current"] = turn + 1
 
-    # Update phase based on turn count vs picon_turns (stored at session start).
-    # Warmup (predefined get-to-know): turns 0–9
-    # Main interrogation: turns 10 – (picon_turns-1)
-    # Repeat (retest): turns >= picon_turns
-    # Confirmation questions are interleaved but we estimate phase from the count.
+    # Update phase. Turn count alone cannot decide the phase: confirmation
+    # questions are interleaved into the main interrogation, so the human can
+    # be past picon_turns questions while picon is still mid-interrogation.
+    # - Predefined (seed): turn 0 only (one generated seed question).
+    # - Repeat (retest): picon's finalize() always prefixes the retest with
+    #   "Just to clarify, " and can only start once picon's internal turn
+    #   counter reaches picon_turns, so require both signals.
+    # - Everything else is the main interrogation.
     picon_turns = session.get("picon_turns", 30)
-    if turn < 10:
+    if turn < 1:
         session["progress"]["phase"] = "predefined"
-    elif turn < picon_turns:
-        session["progress"]["phase"] = "main"
-    else:
+    elif turn >= picon_turns and next_q["question"].startswith("Just to clarify"):
         session["progress"]["phase"] = "repeat"
+    else:
+        session["progress"]["phase"] = "main"
 
     return {
         "next_question": next_q["question"],
@@ -1016,6 +1019,10 @@ async def _run_experience_session(
             num_turns=num_turns,
             num_sessions=1,
             do_eval=True,
+            # verbose=True makes picon set the root logger to ERROR and switch to
+            # bare print() lines; verbose=False keeps the [QUESTION]/[RESPONSE]
+            # INFO logs alive, which Railway logs and the demo terminal rely on.
+            verbose=False,
             output_dir=f"/tmp/picon_results/{session_id}",
             **PICON_AGENT_MODELS,
         )
@@ -1080,7 +1087,9 @@ async def _run_experience_session(
                 logger.info("Experience eval_scores keys for %s: %s", name, list(scores.keys()))
                 logger.info("Experience eval_scores for %s: %s", name, scores)
                 session["result"] = {
-                    "ic": scores.get("internal_harmonic_mean"),
+                    # picon renamed internal_harmonic_mean -> ic_score (0.1.6+);
+                    # keep the old key as fallback for older picon versions.
+                    "ic": scores.get("ic_score", scores.get("internal_harmonic_mean")),
                     "ec": scores.get("external_ec"),
                     "rc": scores.get("intra_session_stability"),
                 }
@@ -1334,6 +1343,7 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
                 num_turns=picon_turns,
                 num_sessions=req.num_sessions,
                 do_eval=True,
+                verbose=False,  # see the Experience run_kwargs comment
                 output_dir=f"/tmp/picon_results/{job_id}",
                 **PICON_AGENT_MODELS,
             )
@@ -1347,6 +1357,7 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
                 num_turns=picon_turns,
                 num_sessions=req.num_sessions,
                 do_eval=True,
+                verbose=False,  # see the Experience run_kwargs comment
                 output_dir=f"/tmp/picon_results/{job_id}",
                 **PICON_AGENT_MODELS,
             )
@@ -1420,11 +1431,16 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
                     logger.info("Agent eval_scores keys for %s: %s", req.name, list(scores.keys()))
                     logger.info("Agent eval_scores for %s: %s", req.name, scores)
                     job["result"] = {
-                        "ic": scores.get("internal_harmonic_mean"),
+                        # picon renamed the internal-consistency keys (0.1.6+):
+                        # internal_harmonic_mean -> ic_score,
+                        # internal_responsiveness -> cooperativeness,
+                        # internal_consistency -> non_contradiction_rate.
+                        # Old keys kept as fallback for older picon versions.
+                        "ic": scores.get("ic_score", scores.get("internal_harmonic_mean")),
                         "ec": scores.get("external_ec"),
                         "rc": scores.get("intra_session_stability"),
-                        "internal_responsiveness": scores.get("internal_responsiveness"),
-                        "internal_consistency": scores.get("internal_consistency"),
+                        "internal_responsiveness": scores.get("cooperativeness", scores.get("internal_responsiveness")),
+                        "internal_consistency": scores.get("non_contradiction_rate", scores.get("internal_consistency")),
                         "inter_session_stability": scores.get("inter_session_stability"),
                         "intra_session_stability": scores.get("intra_session_stability"),
                     }
