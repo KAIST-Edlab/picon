@@ -186,6 +186,17 @@ def _release_key(idx: int):
 # so we pass the user's requested turns directly (no subtraction needed).
 # The repeat phase (10 more turns) runs on top of max_turns automatically.
 
+
+def _normalize_turns(n: int) -> int:
+    """Snap a requested turn count to the two supported protocols.
+
+    15 = one generated seed question + interrogation.
+    50 = the original protocol (picon's bundled 10 WVS questions).
+    Stale cached frontends may still send 30 or 75; snap them to the
+    nearest supported protocol instead of running an undefined hybrid.
+    """
+    return 15 if n < 50 else 50
+
 # ---------------------------------------------------------------------------
 # Usage / Budget tracking  (SQLite-backed, survives restarts)
 # ---------------------------------------------------------------------------
@@ -268,24 +279,27 @@ def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict, openai_
 
     import picon
 
-    # Replace picon's static WVS question bank with one generated seed question.
-    # See _generate_seed_question above for why this is a rebinding rather than
-    # an argument. If generation fails we leave run_kwargs untouched, so picon
-    # falls back to its bundled 10-question bank and the interview still runs.
-    try:
-        _seed_dir = run_kwargs.get("output_dir") or "/tmp/picon_results"
-        _seed_path, _seed_q = _generate_seed_question(_seed_dir)
-        import picon.api
-        import picon.config
-        picon.api.get_question_path = lambda: _seed_path
-        picon.config.get_question_path = lambda: _seed_path
-        run_kwargs = {**run_kwargs, "num_get_to_know_q": 1}
-        result_queue.put(("log", f"Seed question: {_seed_q}"))
-    except Exception as _seed_err:
-        result_queue.put((
-            "log",
-            f"Seed-question generation failed ({_seed_err}); falling back to the WVS bank.",
-        ))
+    # 15-turn runs open with one generated seed question instead of the static
+    # WVS bank; 50-turn runs keep the original protocol (10 WVS questions), so
+    # generation is skipped entirely there. See _generate_seed_question above
+    # for why this is a rebinding rather than an argument. If generation fails
+    # we leave run_kwargs untouched, so picon falls back to its bundled
+    # 10-question bank and the interview still runs.
+    if run_kwargs.get("num_turns") == 15:
+        try:
+            _seed_dir = run_kwargs.get("output_dir") or "/tmp/picon_results"
+            _seed_path, _seed_q = _generate_seed_question(_seed_dir)
+            import picon.api
+            import picon.config
+            picon.api.get_question_path = lambda: _seed_path
+            picon.config.get_question_path = lambda: _seed_path
+            run_kwargs = {**run_kwargs, "num_get_to_know_q": 1}
+            result_queue.put(("log", f"Seed question: {_seed_q}"))
+        except Exception as _seed_err:
+            result_queue.put((
+                "log",
+                f"Seed-question generation failed ({_seed_err}); falling back to the WVS bank.",
+            ))
 
     try:
         result = picon.run(**run_kwargs)
@@ -759,7 +773,7 @@ async def experience_start(req: ExperienceStartRequest, request: Request):
     sessions[session_id] = session
 
     # Subtract pre-screening turns so picon gets pure interview turn count
-    picon_turns = max(req.num_turns, 15)
+    picon_turns = _normalize_turns(req.num_turns)
     session["picon_turns"] = picon_turns
 
     # Launch background task (will wait for semaphore if at capacity)
@@ -915,13 +929,15 @@ async def experience_respond(req: ExperienceRespondRequest):
     # Update phase. Turn count alone cannot decide the phase: confirmation
     # questions are interleaved into the main interrogation, so the human can
     # be past picon_turns questions while picon is still mid-interrogation.
-    # - Predefined (seed): turn 0 only (one generated seed question).
+    # - Predefined: one generated seed question on 15-turn runs, the original
+    #   10 WVS questions on 50-turn runs (they always come first, in order).
     # - Repeat (retest): picon's finalize() always prefixes the retest with
     #   "Just to clarify, " and can only start once picon's internal turn
     #   counter reaches picon_turns, so require both signals.
     # - Everything else is the main interrogation.
     picon_turns = session.get("picon_turns", 30)
-    if turn < 1:
+    num_predefined = 1 if picon_turns == 15 else 10
+    if turn < num_predefined:
         session["progress"]["phase"] = "predefined"
     elif turn >= picon_turns and next_q["question"].startswith("Just to clarify"):
         session["progress"]["phase"] = "repeat"
@@ -1333,7 +1349,7 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
         logger.info("Job %s started (slots: %d/%d used, key pool[%d])", job_id,
                      MAX_CONCURRENT_JOBS - sem._value, MAX_CONCURRENT_JOBS, key_idx)
 
-        picon_turns = max(req.num_turns, 15)
+        picon_turns = _normalize_turns(req.num_turns)
 
         if req.mode == "external":
             run_kwargs = dict(
