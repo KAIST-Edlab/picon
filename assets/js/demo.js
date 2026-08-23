@@ -98,6 +98,51 @@
     return text.replace(/(https?:\/\/[^\s)<>]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
   }
 
+  // Minimal markdown renderer for interviewer messages. SECURITY: the input
+  // MUST already be HTML-escaped; this function only ever emits tags it
+  // constructs itself (strong/code/ul/ol/li/div/br), so model output can
+  // never inject markup. Do not replace with a full markdown library that
+  // passes raw HTML through.
+  function renderMarkdown(escaped) {
+    // inline: bold and code (escaped text, so no tag collisions)
+    function inline(s) {
+      return linkify(s
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>'));
+    }
+    var lines = escaped.split(/\r?\n/);
+    var html = [];
+    var listStack = [];  // open list tags: 'ul' | 'ol'
+    function closeLists(depth) {
+      while (listStack.length > depth) html.push('</' + listStack.pop() + '>');
+    }
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var h = line.match(/^(#{1,3})\s+(.*)$/);
+      var ulm = line.match(/^(\s*)-\s+(.*)$/);
+      var olm = line.match(/^(\s*)\d+\.\s+(.*)$/);
+      if (h) {
+        closeLists(0);
+        html.push('<div class="md-h md-h' + h[1].length + '">' + inline(h[2]) + '</div>');
+      } else if (ulm || olm) {
+        var m = ulm || olm;
+        var depth = Math.floor(m[1].length / 2) + 1;
+        var tag = ulm ? 'ul' : 'ol';
+        while (listStack.length > depth) html.push('</' + listStack.pop() + '>');
+        while (listStack.length < depth) { html.push('<' + tag + '>'); listStack.push(tag); }
+        html.push('<li>' + inline(m[2]) + '</li>');
+      } else if (line.trim() === '') {
+        closeLists(0);
+        html.push('<div class="md-gap"></div>');
+      } else {
+        closeLists(0);
+        html.push('<div>' + inline(line) + '</div>');
+      }
+    }
+    closeLists(0);
+    return html.join('');
+  }
+
   function smartScroll(container) {
     var nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 40;
     if (nearBottom) container.scrollTop = container.scrollHeight;
@@ -106,7 +151,10 @@
   function addMessage(container, type, text) {
     var el = document.createElement('div');
     el.className = 'chat-msg ' + type;
-    el.innerHTML = linkify(text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+    var escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // Interviewer messages (picon's instruction block is markdown) get the
+    // markdown renderer; user/info messages stay plain.
+    el.innerHTML = (type === 'system') ? renderMarkdown(escaped) : linkify(escaped);
     container.appendChild(el);
     smartScroll(container);
     return el;
