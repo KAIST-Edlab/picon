@@ -10,13 +10,12 @@ layout_js: /assets/js/demo.js
   <p class="subtitle">Experience the PICon interrogation, test your own persona agent, or browse the leaderboard</p>
 
   <div class="turn-info-box">
-    <strong>How turns work:</strong> For example, selecting <em>30 turns</em> means:
+    <strong>How turns work:</strong> Every interview moves through three phases:
     <ul>
-      <li><strong>10 warm-up questions</strong> &mdash; predefined get-to-know questions</li>
-      <li><strong>20+ interrogation questions</strong> &mdash; adaptive follow-ups &amp; fact-checking confirmations</li>
-      <li><strong>10 retest questions</strong> &mdash; repeats of warm-up to check consistency</li>
+      <li><strong>Get-to-know</strong> &mdash; seed question(s) collecting basic facts (one generated question at 15 turns, ten predefined at 50)</li>
+      <li><strong>Main interrogation</strong> &mdash; follow-up questions that drill into earlier answers; checkable claims are verified via web search, which may add confirmation questions</li>
+      <li><strong>Retest</strong> &mdash; the get-to-know questions asked again to check consistency</li>
     </ul>
-    The "+" is because PICon may ask additional confirmation questions when verifying claims via web search.
     The <strong>Q number</strong> shown during the interview counts total questions asked (including confirmations), not turns.
   </div>
 
@@ -131,8 +130,6 @@ layout_js: /assets/js/demo.js
           <label for="ext-agent-sessions">Sessions</label>
           <select id="ext-agent-sessions">
             <option value="1" selected>1 session</option>
-            <option value="2">2 sessions</option>
-            <option value="3">3 sessions</option>
           </select>
         </div>
       </div>
@@ -209,8 +206,6 @@ layout_js: /assets/js/demo.js
           <label for="quick-agent-sessions">Sessions</label>
           <select id="quick-agent-sessions">
             <option value="1" selected>1 session</option>
-            <option value="2">2 sessions</option>
-            <option value="3">3 sessions</option>
           </select>
         </div>
       </div>
