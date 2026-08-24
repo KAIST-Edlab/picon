@@ -421,22 +421,27 @@ SEED_QUESTION_MODEL = os.getenv("PICON_SEED_QUESTION_MODEL", "gpt-5")
 
 _SEED_QUESTION_PROMPT = """You write a single opening question for a research interview whose goal is to build an accurate picture of the interviewee.
 
-The question asks for exactly one concrete fact about this person, and the answer should be a nameable thing: a place, a person, an institution, or a product. A nameable answer gives the interviewer something specific to follow up on for the rest of the interview.
+The question asks for exactly one concrete fact about this person, and the answer should be a nameable thing: a place, a person, an institution, etc. A nameable answer gives the interviewer something specific to follow up on for the rest of the interview.
 
 Questions of the right kind:
 - Where were you born?
 - Where do you live now?
 - What is the first name of the person you communicate with most often?
 - What is the name of a restaurant or cafe you go to often?
-- If you traveled somewhere recently, where did you go?
-- What was the name of the school you attended?
-- Who was the last friend you saw in person?
-- What is the name of an app you use often?
+
+The user message gives you the topic. Stay on that topic.
 
 Write one new question in the same spirit. Do not reuse any of the examples. Keep it plain and short: one sentence, asking for one thing.
 
 Return JSON only: {"question": "...", "expected_answer": "what kind of nameable thing the answer should be"}"""
 
+# Sampled in code (not by the model): independent LLM calls collapse onto the
+# same two or three stock questions when the model picks the topic itself.
+_SEED_TOPICS = [
+    "hometown", "family", "education", "industry", "hobbies", "music",
+    "movies/TV shows", "books/podcasts/games", "friends", "dreams/goals",
+    "zodiac", "culture/contents",
+]
 
 SEED_QUESTION_RETRIES = int(os.getenv("PICON_SEED_QUESTION_RETRIES", "3"))
 
@@ -452,18 +457,20 @@ def _generate_seed_question(out_dir: str) -> tuple:
     Returns (path, question_text).
     """
     import json as _json
+    import random as _random
     import time as _time
     import litellm as _litellm
 
     _litellm.drop_params = True
     last_err = None
     for attempt in range(1, SEED_QUESTION_RETRIES + 1):
+        topic = _random.choice(_SEED_TOPICS)
         try:
             res = _litellm.completion(
                 model=SEED_QUESTION_MODEL,
                 messages=[
                     {"role": "system", "content": _SEED_QUESTION_PROMPT},
-                    {"role": "user", "content": "Write the question."},
+                    {"role": "user", "content": f"Write the question. Topic: {topic}"},
                 ],
                 timeout=120,
             )
@@ -1170,12 +1177,24 @@ async def agent_start(req: AgentStartRequest, request: Request):
             raise HTTPException(status_code=400, detail="Persona / system prompt is required for quick agent mode")
         has_creds = bool(req.api_key) or bool(req.api_base) or bool(req.extra_env)
         if not has_creds:
-            # Sponsored run: no credentials at all means the server pays for the
-            # agent's inference, so the model choice is not the user's — pin it
-            # to the sponsored model no matter what the Model field said. The
-            # worker exports the pool key as OPENAI_API_KEY in the subprocess,
-            # and litellm falls back to it when api_key is None.
-            req.model = SPONSORED_QUICK_MODEL
+            # Sponsored run: no credentials at all means the server pays for
+            # the agent's inference on its OpenAI key pool. An empty Model
+            # field gets the default sponsored model; a typed model is honored
+            # only if it is an OpenAI model in openai/* form (the pool key
+            # cannot serve other providers). The worker exports the pool key
+            # as OPENAI_API_KEY in the subprocess, and litellm falls back to
+            # it when api_key is None.
+            if not req.model:
+                req.model = SPONSORED_QUICK_MODEL
+            elif not req.model.lower().startswith("openai/"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Sponsored runs (no API key) support OpenAI models only — "
+                        f"use 'openai/<model>' format (e.g. {SPONSORED_QUICK_MODEL}), "
+                        "or provide your own API key."
+                    ),
+                )
         else:
             if not req.model:
                 raise HTTPException(status_code=400, detail="Model name is required for quick agent mode")

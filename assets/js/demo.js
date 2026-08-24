@@ -556,10 +556,15 @@
 
     if (!name) { alert('Please provide an agent name.'); return; }
     if (!apiKey && !apiBase && !hasExtraEnv) {
-      // Sponsored run: the backend pins credential-less jobs to gpt-5-nano on
-      // the server's key, whatever the Model field says. Mirror that here so
-      // the status line and payload show the model that actually runs.
-      model = 'openai/gpt-5-nano';
+      // Sponsored run on the server's OpenAI key: empty model defaults to
+      // gpt-5-nano; a typed model must be openai/* (the backend enforces the
+      // same rule).
+      if (!model) {
+        model = 'openai/gpt-5-nano';
+      } else if (model.toLowerCase().indexOf('openai/') !== 0) {
+        alert('Sponsored runs (no API key) support OpenAI models only — use "openai/..." format (e.g. openai/gpt-5-nano), or provide your own API key.');
+        return;
+      }
     } else if (!model) {
       alert('Please provide a model name in LiteLLM format (e.g. openai/gpt-4o, gemini/gemini-2.5-flash).');
       return;
