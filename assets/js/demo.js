@@ -555,9 +555,13 @@
     var hasExtraEnv = Object.keys(extraEnv).length > 0;
 
     if (!name) { alert('Please provide an agent name.'); return; }
-    if (!model) { alert('Please provide a model name in LiteLLM format (e.g. openai/gpt-4o, gemini/gemini-2.5-flash).'); return; }
     if (!apiKey && !apiBase && !hasExtraEnv) {
-      alert('Please provide an API key, OR an API Base URL (self-hosted/local), OR provider env vars in "Advanced".');
+      // Sponsored run: the backend pins credential-less jobs to gpt-5-nano on
+      // the server's key, whatever the Model field says. Mirror that here so
+      // the status line and payload show the model that actually runs.
+      model = 'openai/gpt-5-nano';
+    } else if (!model) {
+      alert('Please provide a model name in LiteLLM format (e.g. openai/gpt-4o, gemini/gemini-2.5-flash).');
       return;
     }
     if (!persona) { alert('Please provide a persona / system prompt.'); return; }

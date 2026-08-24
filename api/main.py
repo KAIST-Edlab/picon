@@ -204,6 +204,10 @@ def _normalize_turns(n: int) -> int:
 MAX_COST_PER_JOB = float(os.getenv("MAX_COST_PER_JOB", "3.0"))
 # Daily per-IP budget — once an IP crosses this, new jobs are rejected. 0 = off.
 MAX_COST_PER_IP_DAILY = float(os.getenv("MAX_COST_PER_IP_DAILY", "10.0"))
+# Quick-mode jobs submitted with no credentials at all run on the server's own
+# key, pinned to this model regardless of what the user typed in the Model
+# field. PICON_ prefix keeps it out of user-settable extra_env (deny-prefixed).
+SPONSORED_QUICK_MODEL = os.getenv("PICON_SPONSORED_QUICK_MODEL", "openai/gpt-5-nano")
 
 # In-memory cache for per-job totals (fast path; rebuilt from SQLite on restart isn't
 # needed because per-job cost only matters while the job is running).
@@ -1162,36 +1166,35 @@ async def agent_start(req: AgentStartRequest, request: Request):
     if req.mode == "external" and not req.api_base:
         raise HTTPException(status_code=400, detail="API endpoint is required for external agent mode")
     if req.mode == "quick":
-        if not req.model:
-            raise HTTPException(status_code=400, detail="Model name is required for quick agent mode")
         if not req.persona:
             raise HTTPException(status_code=400, detail="Persona / system prompt is required for quick agent mode")
-        # Prevent agent-inference leeching: without at least some form of
-        # user-provided credentials, litellm would silently fall back to the
-        # server's env (e.g. OPENAI_API_KEY), running the user's agent on our
-        # dime. Require api_key, api_base, or a non-empty extra_env.
         has_creds = bool(req.api_key) or bool(req.api_base) or bool(req.extra_env)
         if not has_creds:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Provide credentials for your agent model: an API key, an API Base URL "
-                    "(for local/self-hosted models), or env vars (Advanced — for providers "
-                    "like Bedrock that authenticate via env vars)."
-                ),
-            )
-        # Extra safety: if the model is a first-party cloud provider that we
-        # have server-side keys for, litellm could fall back to our keys even
-        # when user supplied extra_env. Require an explicit api_key for these.
-        leech_prefixes = ("openai/", "gemini/", "azure/", "azure_ai/")
-        if not req.api_key and req.model.lower().startswith(leech_prefixes):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Model '{req.model}' requires an explicit API key (to prevent "
-                    "accidental use of the server's key)."
-                ),
-            )
+            # Sponsored run: no credentials at all means the server pays for the
+            # agent's inference, so the model choice is not the user's — pin it
+            # to the sponsored model no matter what the Model field said. The
+            # worker exports the pool key as OPENAI_API_KEY in the subprocess,
+            # and litellm falls back to it when api_key is None.
+            req.model = SPONSORED_QUICK_MODEL
+        else:
+            if not req.model:
+                raise HTTPException(status_code=400, detail="Model name is required for quick agent mode")
+            # Prevent agent-inference leeching on partial credentials: if the
+            # model is a first-party cloud provider that we have server-side
+            # keys for, litellm could fall back to our keys even when the user
+            # supplied only api_base/extra_env. Require an explicit api_key for
+            # these (credential-less requests are pinned to the sponsored model
+            # above instead, so this branch never sees them).
+            leech_prefixes = ("openai/", "gemini/", "azure/", "azure_ai/")
+            if not req.api_key and req.model.lower().startswith(leech_prefixes):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Model '{req.model}' requires an explicit API key (to prevent "
+                        "accidental use of the server's key). Leave every credential "
+                        "field empty instead to run on our sponsored model."
+                    ),
+                )
         # Validate and filter user-supplied env vars (raises 400 on denylisted keys).
         req.extra_env = _sanitize_extra_env(req.extra_env)
 

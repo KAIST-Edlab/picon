@@ -366,8 +366,14 @@
     var sessions = document.getElementById('quick-agent-sessions').value;
 
     if (!name) { alert('Please provide an agent name.'); return; }
-    if (!model) { alert('Please provide a model name (e.g. gpt-4o, gemini/gemini-2.5-flash).'); return; }
-    if (!apiKey) { alert('Please provide an API key. This covers your agent\'s LLM inference cost only — PICon evaluation cost is on us.'); return; }
+    if (!apiKey) {
+      // Sponsored run: the backend pins credential-less jobs to gpt-5-nano on
+      // the server's key, whatever the Model field says.
+      model = 'openai/gpt-5-nano';
+    } else if (!model) {
+      alert('Please provide a model name (e.g. gpt-4o, gemini/gemini-2.5-flash).');
+      return;
+    }
     if (!persona) { alert('Please provide a persona / system prompt.'); return; }
 
     startAgentEvaluation({

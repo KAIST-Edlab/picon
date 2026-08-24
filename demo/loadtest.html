@@ -715,8 +715,8 @@
       alert('Fill in agent endpoint for external mode.');
       return;
     }
-    if (mode === 'quick' && (!quickModel || !quickApiKey)) {
-      alert('Fill in Model and API key for quick mode.');
+    if (mode === 'quick' && quickApiKey && !quickModel) {
+      alert('Fill in Model for quick mode (or clear the API key to run on the sponsored gpt-5-nano).');
       return;
     }
 
