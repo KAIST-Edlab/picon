@@ -469,6 +469,8 @@
     currentAgentLabel = displayLabel;
     agentCancelled = false;
     lastDisplayedEntry = null;
+    var manualAskBox = document.getElementById('agent-manual-ask');
+    if (manualAskBox) manualAskBox.style.display = 'none';
     // Save Log button stays visible throughout — partial logs are useful too,
     // especially when an eval errors out mid-run.
     var saveLogBtn = document.getElementById('agent-save-log-btn');
@@ -512,6 +514,7 @@
     var endpoint = document.getElementById('ext-agent-endpoint').value.trim();
     var turns = document.getElementById('ext-agent-turns').value;
     var sessions = document.getElementById('ext-agent-sessions').value;
+    var interrogator = document.getElementById('ext-agent-interrogator').value;
 
     if (!name) { alert('Please provide an agent name.'); return; }
     if (!endpoint) { alert('Please provide your agent\'s API endpoint.'); return; }
@@ -522,6 +525,7 @@
       api_base: endpoint,
       num_turns: parseInt(turns),
       num_sessions: parseInt(sessions),
+      interrogator: interrogator,
     }, name + ', endpoint=' + endpoint + ', turns=' + turns);
   });
 
@@ -583,6 +587,7 @@
       persona: persona,
       num_turns: parseInt(turns),
       num_sessions: parseInt(sessions),
+      interrogator: document.getElementById('quick-agent-interrogator').value,
     };
     if (apiBase) payload.api_base = apiBase;
     if (apiVersion) payload.api_version = apiVersion;
@@ -747,6 +752,25 @@
             'Session ' + data.current_session + '/' + data.total_sessions + ' — Running...';
         }
 
+        // Manual interrogator: the backend pauses inside questioner.act() and
+        // sets awaiting_question until we POST /api/agent/question.
+        var askBox = document.getElementById('agent-manual-ask');
+        if (askBox) {
+          if (data.awaiting_question && !data.is_complete) {
+            var aq = data.awaiting_question;
+            document.getElementById('agent-manual-hint').textContent =
+              'Your turn — ask question ' + aq.turn + '/' + data.total_turns +
+              '. The interview fails if no question arrives within 10 minutes.';
+            if (askBox.style.display === 'none') {
+              askBox.style.display = 'block';
+              document.getElementById('agent-manual-input').focus();
+            }
+            agentProgress.textContent = 'Waiting for your question (turn ' + aq.turn + ')...';
+          } else {
+            askBox.style.display = 'none';
+          }
+        }
+
         if (data.is_complete) {
           stop();
           if (agentCancelled) return;  // user clicked Cancel — don't render results
@@ -825,10 +849,47 @@
     }, 3000);
   }
 
+  // Manual interrogator input — POST the typed question; the poller re-shows
+  // the box when the backend asks for the next one.
+  var manualSendBtn = document.getElementById('agent-manual-send');
+  var manualInput = document.getElementById('agent-manual-input');
+  async function sendManualQuestion() {
+    var q = manualInput.value.trim();
+    if (!q || !agentSessionId) return;
+    manualSendBtn.disabled = true;
+    try {
+      var res = await fetch(API_BASE + '/api/agent/question', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: agentSessionId, question: q })
+      });
+      if (res.ok) {
+        manualInput.value = '';
+        document.getElementById('agent-manual-ask').style.display = 'none';
+        agentProgress.textContent = 'Question sent — waiting for the agent...';
+      } else {
+        var err = await res.json().catch(function () { return {}; });
+        alert('Could not send question: ' + (err.detail || ('HTTP ' + res.status)));
+      }
+    } catch (e) {
+      alert('Network error sending question: ' + e.message);
+    } finally {
+      manualSendBtn.disabled = false;
+    }
+  }
+  if (manualSendBtn && manualInput) {
+    manualSendBtn.addEventListener('click', sendManualQuestion);
+    manualInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); sendManualQuestion(); }
+    });
+  }
+
   function showAgentForm() {
     document.getElementById('agent-submode-selector').style.display = '';
     document.getElementById('agent-form-external').style.display = activeSubmode === 'external' ? 'flex' : 'none';
     document.getElementById('agent-form-quick').style.display = activeSubmode === 'quick' ? 'flex' : 'none';
+    var manualAskBox = document.getElementById('agent-manual-ask');
+    if (manualAskBox) manualAskBox.style.display = 'none';
     // Hide any stale results card from a previous run — otherwise the user sees
     // an empty "Evaluation Report — 50 turns" with "—" placeholders before they
     // start a new run.

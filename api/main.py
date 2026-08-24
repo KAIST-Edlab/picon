@@ -109,6 +109,10 @@ JOB_HARD_TIMEOUT = int(os.getenv("JOB_HARD_TIMEOUT", str(JOB_TIMEOUT + 7200)))  
 EVAL_TIMEOUT = int(os.getenv("EVAL_TIMEOUT", "900"))  # 15 min for eval after interview
 # Experience Mode: if browser stops polling for this many seconds, consider abandoned
 EXPERIENCE_ABANDON_TIMEOUT = int(os.getenv("EXPERIENCE_ABANDON_TIMEOUT", "120"))  # 2 minutes
+# Manual interrogator (human asks the questions in Agent Test Mode): how long the
+# picon subprocess blocks inside questioner.act() waiting for the human's next
+# question before the job is failed.
+MANUAL_QUESTION_TIMEOUT = int(os.getenv("MANUAL_QUESTION_TIMEOUT", "600"))  # 10 minutes
 
 
 def _hard_kill(proc, grace: float = 5.0):
@@ -243,13 +247,19 @@ class _QueueLogStream:
         self._buf = ""
 
 
-def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict, openai_key: str = "", extra_env: Optional[dict] = None):
+def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict, openai_key: str = "", extra_env: Optional[dict] = None, manual_queue: Optional[multiprocessing.Queue] = None):
     """
     Runs inside a subprocess. Sets the assigned OpenAI key in the subprocess
     environment, then calls picon.run(). Used by both Agent Test and Experience modes.
 
     Captures stdout, stderr, and root logger output and forwards them as
     ('log', line) messages so the parent can expose them via /api/agent/logs.
+
+    When manual_queue is given (manual interrogator mode), the questioner's
+    act() is replaced: each main-interrogation question comes from the human
+    via manual_queue instead of an LLM call. Everything else — get-to-know and
+    repeat phases, extractor/web-search, confirmation questions (generated with
+    questioner.model, still a real LLM), evaluator — runs unchanged.
     """
     if openai_key:
         os.environ["OPENAI_API_KEY"] = openai_key
@@ -282,6 +292,47 @@ def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict, openai_
     root.setLevel(_logging.INFO)
 
     import picon
+
+    if manual_queue is not None:
+        import picon.api
+        from picon.schemas import Action as _Action
+
+        _orig_get_agent = picon.api.get_agent
+
+        def _patched_get_agent(role, prompt_path, **agent_kwargs):
+            agent = _orig_get_agent(role, prompt_path, **agent_kwargs)
+            if role != "questioner":
+                return agent
+            turn_counter = {"n": 0}
+
+            def _human_act():
+                turn_counter["n"] += 1
+                last_answer = next(
+                    (m.get("content", "") for m in reversed(agent.memory) if m.get("role") == "user"),
+                    "",
+                )
+                result_queue.put(("await_question", {
+                    "turn": turn_counter["n"],
+                    "last_answer": last_answer,
+                }))
+                try:
+                    human_question = manual_queue.get(timeout=MANUAL_QUESTION_TIMEOUT)
+                except queue.Empty:
+                    raise RuntimeError(
+                        f"Manual interrogator timed out: no question received "
+                        f"within {MANUAL_QUESTION_TIMEOUT}s."
+                    )
+                human_question = str(human_question).strip()
+                agent.update_memory(role="assistant", content=human_question)
+                return _Action(agent=agent.role, action_type="respond", content=human_question)
+
+            # Instance attribute shadows the bound method — only THIS agent's
+            # act() is replaced; agent.model stays gpt-5 so the confirmation
+            # questions in check_external keep using the real LLM.
+            agent.act = _human_act
+            return agent
+
+        picon.api.get_agent = _patched_get_agent
 
     # 15-turn runs open with one generated seed question instead of the static
     # WVS bank; 50-turn runs keep the original protocol (10 WVS questions), so
@@ -639,6 +690,12 @@ class AgentStartRequest(BaseModel):
     persona: Optional[str] = None
     num_turns: int = 50
     num_sessions: int = 2
+    interrogator: str = "picon"  # "picon" (automated) or "manual" (human asks)
+
+
+class AgentQuestionRequest(BaseModel):
+    session_id: str
+    question: str
 
 
 # Env var keys the user is NOT allowed to set — would collide with picon's
@@ -1170,6 +1227,8 @@ async def agent_start(req: AgentStartRequest, request: Request):
     """Start a background picon.run() evaluation against an external agent."""
     if not req.name:
         raise HTTPException(status_code=400, detail="Agent name is required")
+    if req.interrogator not in ("picon", "manual"):
+        raise HTTPException(status_code=400, detail="interrogator must be 'picon' or 'manual'")
     if req.mode == "external" and not req.api_base:
         raise HTTPException(status_code=400, detail="API endpoint is required for external agent mode")
     if req.mode == "quick":
@@ -1226,6 +1285,8 @@ async def agent_start(req: AgentStartRequest, request: Request):
         "status": "queued",
         "name": req.name,
         "model": req.model,
+        "interrogator": req.interrogator,
+        "awaiting_question": None,
         "current_session": 1,
         "total_sessions": req.num_sessions,
         "current_turn": 0,
@@ -1274,6 +1335,8 @@ async def agent_status(job_id: str):
         "cost_usd": round(job_costs.get(job_id, 0.0), 5),
         "queue_position": queue_position,
         "max_concurrent": MAX_CONCURRENT_JOBS,
+        "interrogator": job.get("interrogator", "picon"),
+        "awaiting_question": job.get("awaiting_question"),
     }
 
 
@@ -1309,6 +1372,32 @@ async def agent_logs(job_id: str, since: int = 0):
         raise HTTPException(status_code=404, detail="Job not found")
     logs = job.get("logs", [])
     return {"lines": logs[since:], "total": len(logs)}
+
+
+@app.post("/api/agent/question")
+async def agent_question(req: AgentQuestionRequest):
+    """Manual interrogator mode: forward the human's next question to the picon
+    subprocess, which is blocked inside questioner.act() waiting for it."""
+    job = agent_jobs.get(req.session_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    manual_queue = job.get("manual_queue")
+    if manual_queue is None:
+        raise HTTPException(status_code=400, detail="Job is not in manual interrogator mode")
+    if job.get("is_complete"):
+        raise HTTPException(status_code=409, detail="Job already finished")
+    if not job.get("awaiting_question"):
+        raise HTTPException(status_code=409, detail="Job is not waiting for a question right now")
+    question = (req.question or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Question must not be empty")
+    if len(question) > 2000:
+        raise HTTPException(status_code=400, detail="Question too long (max 2000 characters)")
+    # Clear the flag BEFORE the put: the subprocess unblocks the moment the item
+    # lands, and a poll racing in between must not show a stale awaiting state.
+    job["awaiting_question"] = None
+    manual_queue.put(question)
+    return {"status": "ok"}
 
 
 @app.delete("/api/agent/cancel/{job_id}")
@@ -1358,6 +1447,7 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
     # Everything below must release sem (and key once acquired) on any exit path.
     key_idx = -1
     proc = None
+    manual_queue = None
     try:
         # Slot acquired — remove from queue, mark running
         async with qlock:
@@ -1402,10 +1492,15 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
             if req.api_version:
                 run_kwargs["api_version"] = req.api_version
 
+        if req.interrogator == "manual":
+            manual_queue = multiprocessing.Queue()
+            job["manual_queue"] = manual_queue
+
         result_queue = multiprocessing.Queue()
         proc = multiprocessing.Process(
             target=_picon_worker,
-            args=(result_queue, run_kwargs, openai_key, req.extra_env if req.mode == "quick" else None),
+            args=(result_queue, run_kwargs, openai_key,
+                  req.extra_env if req.mode == "quick" else None, manual_queue),
             daemon=True,
         )
         job["process"] = proc
@@ -1448,6 +1543,12 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
                 if len(job["logs"]) > 5000:
                     # Trim to bound memory for very long runs
                     job["logs"] = job["logs"][-4000:]
+
+            elif msg_type == "await_question":
+                # Manual interrogator: subprocess is now blocked waiting for the
+                # human's question. Surface it via /api/agent/status.
+                job["awaiting_question"] = payload
+                job["current_turn"] = payload.get("turn", job.get("current_turn", 0))
 
             elif msg_type == "cost":
                 job_total = _add_job_cost(job_id, payload)
@@ -1521,6 +1622,12 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
             proc.join(timeout=5)
             if proc.is_alive():
                 await asyncio.to_thread(_hard_kill, proc)
+        if manual_queue is not None:
+            # Late /api/agent/question calls now 409 on the cleared flag instead
+            # of feeding a dead subprocess.
+            job["awaiting_question"] = None
+            job.pop("manual_queue", None)
+            manual_queue.close()
         _release_key(key_idx)
         sem.release()
         logger.info("Job %s released slot + key pool[%d] (slots: %d/%d used)", job_id,
