@@ -334,13 +334,50 @@ def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict, openai_
 
         picon.api.get_agent = _patched_get_agent
 
+        # Manual runs skip the predefined get-to-know phase entirely: the human
+        # interrogates from turn 1. The retest still needs originals to repeat,
+        # so finalize() re-asks the human's first questions (1 on <=15-turn
+        # runs, 10 on longer ones) after relabeling those turns as get_to_know,
+        # which is exactly the shape the evaluator's intra-session pairing
+        # (zip(get_to_knows, repeats) + substring assert) expects.
+        from picon.env.interrogation_env import InterrogationEnv as _Env
+
+        _orig_reset = _Env.reset
+        _orig_finalize = _Env.finalize
+
+        def _manual_reset(self, reset_only=False):
+            saved_questions = self.active_questions
+            self.active_questions = []
+            try:
+                # Empty question list -> reset() sends only the interview
+                # instruction; current_turn stays 0.
+                return _orig_reset(self, reset_only=reset_only)
+            finally:
+                self.active_questions = saved_questions
+
+        def _manual_finalize(self):
+            n_repeat = 1 if self.max_turns <= 15 else 10
+            firsts = [t for t in self.state.history if t.type == "main_interrogation"][:n_repeat]
+            for t in firsts:
+                t.type = "get_to_know"
+            self.active_questions = [
+                {"id": f"manual_{i + 1}", "question": t.environment_observation[0].response.question}
+                for i, t in enumerate(firsts)
+            ]
+            return _orig_finalize(self)
+
+        _Env.reset = _manual_reset
+        _Env.finalize = _manual_finalize
+
     # 15-turn runs open with one generated seed question instead of the static
     # WVS bank; 50-turn runs keep the original protocol (10 WVS questions), so
     # generation is skipped entirely there. See _generate_seed_question above
     # for why this is a rebinding rather than an argument. If generation fails
     # we leave run_kwargs untouched, so picon falls back to its bundled
-    # 10-question bank and the interview still runs.
-    if run_kwargs.get("num_turns") == 15:
+    # 10-question bank and the interview still runs. Manual-interrogator runs
+    # have no get-to-know phase at all (see _manual_reset above), so seed
+    # generation would be wasted money there.
+    if run_kwargs.get("num_turns") == 15 and manual_queue is None:
         try:
             _seed_dir = run_kwargs.get("output_dir") or "/tmp/picon_results"
             _seed_path, _seed_q = _generate_seed_question(_seed_dir)
@@ -1229,6 +1266,10 @@ async def agent_start(req: AgentStartRequest, request: Request):
         raise HTTPException(status_code=400, detail="Agent name is required")
     if req.interrogator not in ("picon", "manual"):
         raise HTTPException(status_code=400, detail="interrogator must be 'picon' or 'manual'")
+    if req.interrogator == "manual":
+        # Manual runs have no get-to-know phase; a second session would replay
+        # nothing and inter-session stability is undefined for them anyway.
+        req.num_sessions = 1
     if req.mode == "external" and not req.api_base:
         raise HTTPException(status_code=400, detail="API endpoint is required for external agent mode")
     if req.mode == "quick":
