@@ -594,18 +594,9 @@
     var hasExtraEnv = Object.keys(extraEnv).length > 0;
 
     if (!name) { alert('Please provide an agent name.'); return; }
+    if (!model) { alert('Please provide a model name in LiteLLM format (e.g. openai/gpt-4o, gemini/gemini-2.5-flash).'); return; }
     if (!apiKey && !apiBase && !hasExtraEnv) {
-      // Sponsored run on the server's OpenAI key: empty model defaults to
-      // gpt-5-nano; a typed model must be openai/* (the backend enforces the
-      // same rule).
-      if (!model) {
-        model = 'openai/gpt-5-nano';
-      } else if (model.toLowerCase().indexOf('openai/') !== 0) {
-        alert('Sponsored runs (no API key) support OpenAI models only — use "openai/..." format (e.g. openai/gpt-5-nano), or provide your own API key.');
-        return;
-      }
-    } else if (!model) {
-      alert('Please provide a model name in LiteLLM format (e.g. openai/gpt-4o, gemini/gemini-2.5-flash).');
+      alert('Please provide an API key, OR an API Base URL (self-hosted/local), OR provider env vars in "Advanced".');
       return;
     }
     if (!persona) { alert('Please provide a persona / system prompt.'); return; }
