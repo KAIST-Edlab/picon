@@ -11,6 +11,7 @@ Agent Test Mode simply calls picon.run() with the user's external API endpoint.
 """
 
 import asyncio
+import glob
 import logging
 import multiprocessing
 import os
@@ -27,6 +28,7 @@ from typing import Dict, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 load_dotenv()
@@ -678,6 +680,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 # ---------------------------------------------------------------------------
@@ -1439,6 +1442,30 @@ async def agent_question(req: AgentQuestionRequest):
     job["awaiting_question"] = None
     manual_queue.put(question)
     return {"status": "ok"}
+
+
+@app.get("/api/eval-file/{run_id}")
+async def download_eval_file(run_id: str):
+    """Download the raw picon result JSON (full history + evaluation) for a
+    finished run. Works for Experience sessions and Agent Test jobs alike —
+    both write to /tmp/picon_results/{id}. Files live on the container disk,
+    so they are gone after a server restart."""
+    try:
+        uuid.UUID(run_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid run id")
+    result_dir = f"/tmp/picon_results/{run_id}"
+    candidates = [
+        p for p in glob.glob(os.path.join(result_dir, "**", "*.json"), recursive=True)
+        if os.path.basename(p) != "seed_question.json"
+    ]
+    if not candidates:
+        raise HTTPException(
+            status_code=404,
+            detail="Eval file not found. Result files are kept only until the server restarts.",
+        )
+    path = max(candidates, key=os.path.getmtime)
+    return FileResponse(path, media_type="application/json", filename=os.path.basename(path))
 
 
 @app.delete("/api/agent/cancel/{job_id}")

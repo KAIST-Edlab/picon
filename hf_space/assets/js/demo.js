@@ -146,6 +146,34 @@
     el.textContent = phase + ' — Q' + progress.current + '/' + progress.total;
   }
 
+  // Fetch the raw picon result JSON for a finished run and hand it to the
+  // browser as a file download. Shared by Experience and Agent Test modes.
+  async function downloadEvalFile(runId) {
+    if (!runId || !API_BASE) return;
+    try {
+      var res = await fetch(API_BASE + '/api/eval-file/' + runId);
+      if (!res.ok) {
+        var err = await res.json().catch(function () { return {}; });
+        alert('Could not download eval file: ' + (err.detail || ('HTTP ' + res.status)));
+        return;
+      }
+      var blob = await res.blob();
+      var cd = res.headers.get('Content-Disposition') || '';
+      var m = cd.match(/filename="?([^";]+)"?/);
+      var fname = m ? m[1] : ('picon_eval_' + runId.slice(0, 8) + '.json');
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = fname;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert('Network error downloading eval file: ' + e.message);
+    }
+  }
+
   function fmtScore(v) {
     if (v == null) return '—';
     return v.toFixed(2);
@@ -255,6 +283,8 @@
               document.getElementById('exp-score-grid'),
               results.results.eval_scores || {}
             );
+            var expDlBtn = document.getElementById('exp-download-eval-btn');
+            if (expDlBtn) expDlBtn.style.display = '';
           }
         } catch (e) {
           addMessage(expMessages, 'info', 'Results saved. Thank you for participating!');
@@ -471,6 +501,8 @@
               document.getElementById('agent-score-grid'),
               results.scores || {}
             );
+            var agentDlBtn = document.getElementById('agent-download-eval-btn');
+            if (agentDlBtn) agentDlBtn.style.display = '';
 
             // Add to community leaderboard
             var entry = {
@@ -551,6 +583,15 @@
       agentTerminal.textContent = '';
       agentLogIndex = 0;
     });
+  }
+
+  var expDownloadEvalBtn = document.getElementById('exp-download-eval-btn');
+  if (expDownloadEvalBtn) {
+    expDownloadEvalBtn.addEventListener('click', function () { downloadEvalFile(expSessionId); });
+  }
+  var agentDownloadEvalBtn = document.getElementById('agent-download-eval-btn');
+  if (agentDownloadEvalBtn) {
+    agentDownloadEvalBtn.addEventListener('click', function () { downloadEvalFile(agentSessionId); });
   }
 
   // Retry button
