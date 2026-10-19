@@ -1,0 +1,14 @@
+# Lightweight image for the EdLab demo server (Kinstower).
+# PICon's frontend is hosted on GitHub Pages, so this container only holds the
+# autossh tunnel from the demo server to the Daejeon 26 backend. No proxy server.
+FROM python:3.11-slim
+
+WORKDIR /workspace/picon_web
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    curl \
+    openssh-client \
+    autossh \
+    lsof \
+    && rm -rf /var/lib/apt/lists/*

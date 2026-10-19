@@ -1,0 +1,14 @@
+name: mskim_picon_frontend_proxy_server
+
+services:
+  frontend:
+    image: mskim_picon_frontend_proxy_img
+    container_name: mskim_picon_frontend_proxy
+    working_dir: /workspace/picon_web
+    volumes:
+      - /workplace/mskim/picon_web:/workspace/picon_web
+      - ~/.ssh:/root/.ssh:ro
+    ports:
+      - "127.0.0.1:9978:9978"   # ngrok on the demo server host points here
+    command: bash ./edlab_frontend_server.sh
+    restart: unless-stopped

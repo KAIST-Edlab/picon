@@ -1,0 +1,19 @@
+name: mskim_picon_backend_server
+
+services:
+  backend:
+    image: mskim_picon
+    container_name: mskim_picon_backend
+    working_dir: /workspace/PICon_Demo
+    # Run as the `demo` account (uid/gid 9999) so files written to the mounted repo are not root-owned.
+    user: "9999:9999"
+    environment:
+      - HOME=/tmp
+      - BRIDGE_BASE_URL=http://localhost:9978
+      - SQLITE_PATH=/workspace/PICon_Demo/data/picon_data.db
+    volumes:
+      - /home/demo/PICon_Demo:/workspace/PICon_Demo
+    ports:
+      - "127.0.0.1:9978:9978"
+    command: bash ./run_backend.sh 0.0.0.0 9978 --foreground
+    restart: unless-stopped
