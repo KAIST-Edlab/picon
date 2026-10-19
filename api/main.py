@@ -37,6 +37,69 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("picon-api")
 
 # ---------------------------------------------------------------------------
+# LLM gateway (Letsur, OpenAI-compatible)
+# ---------------------------------------------------------------------------
+# When LETSUR_API_KEY is set, every server-side LLM call (questioner, extractor,
+# web search, evaluator, seed question) goes through the gateway with that one
+# key instead of first-party OpenAI / Gemini keys. picon's agents call
+# litellm.completion(model=...) and rely on the environment for credentials, so
+# the switch is done by pointing litellm's "openai" provider at the gateway:
+#   OPENAI_API_KEY  = LETSUR_API_KEY
+#   OPENAI_API_BASE = https://gw.letsur.ai/v1   (litellm reads this)
+#   OPENAI_BASE_URL = https://gw.letsur.ai/v1   (raw openai SDK reads this)
+# Models that litellm would otherwise send to Google directly ("gemini/...")
+# are renamed to "openai/<name>" so they also go through the gateway, which
+# serves them under the same chat/completions API.
+LETSUR_API_KEY = os.getenv("LETSUR_API_KEY", "")
+LETSUR_API_BASE = os.getenv("LETSUR_API_BASE", "https://gw.letsur.ai/v1")
+USE_LETSUR = bool(LETSUR_API_KEY)
+_OPENAI_FIRST_PARTY_BASE = "https://api.openai.com/v1"
+
+
+def _apply_llm_gateway_env():
+    """Route litellm's openai provider (and the raw OpenAI SDK) through the gateway."""
+    if not USE_LETSUR:
+        return
+    os.environ["OPENAI_API_KEY"] = LETSUR_API_KEY
+    os.environ["OPENAI_API_BASE"] = LETSUR_API_BASE
+    os.environ["OPENAI_BASE_URL"] = LETSUR_API_BASE
+
+
+def _gateway_model(name: str) -> str:
+    """Rewrite a litellm model name so it is served by the gateway."""
+    if USE_LETSUR and name.startswith("gemini/"):
+        return "openai/" + name[len("gemini/"):]
+    return name
+
+
+def _register_gateway_model_costs(models) -> None:
+    """
+    picon's agents call litellm.completion_cost() after every response and do
+    not catch ModelNotMappedError, so a gateway model name such as
+    "openai/gemini-2.5-flash" would crash the run. Register its price by
+    copying litellm's entry for the first-party name ("gemini/gemini-2.5-flash",
+    then the bare name).
+    """
+    if not USE_LETSUR:
+        return
+    import litellm
+    for name in models:
+        if not name.startswith("openai/") or name in litellm.model_cost:
+            continue
+        bare = name[len("openai/"):]
+        src = litellm.model_cost.get(f"gemini/{bare}") or litellm.model_cost.get(bare)
+        if not src:
+            logger.warning("No litellm price entry found for %s; cost tracking will fail for it", name)
+            continue
+        entry = {k: src[k] for k in ("input_cost_per_token", "output_cost_per_token") if k in src}
+        litellm.register_model({name: {**entry, "litellm_provider": "openai", "mode": "chat"}})
+
+
+_apply_llm_gateway_env()
+if USE_LETSUR:
+    logger.info("LLM gateway enabled: openai-compatible calls go to %s", LETSUR_API_BASE)
+
+# ---------------------------------------------------------------------------
 # SQLite for persistent storage (leaderboard + completed results)
 # ---------------------------------------------------------------------------
 SQLITE_PATH = os.getenv("SQLITE_PATH", "/tmp/picon_data.db")
@@ -151,6 +214,9 @@ def _get_queue_lock() -> asyncio.Lock:
 # ---------------------------------------------------------------------------
 def _load_key_pool() -> list:
     """Load OpenAI keys from OPENAI_API_KEYS (comma-separated) or fall back to OPENAI_API_KEY."""
+    if USE_LETSUR:
+        # One gateway key serves every job; OPENAI_API_KEYS is ignored.
+        return [LETSUR_API_KEY]
     multi = os.getenv("OPENAI_API_KEYS", "")
     if multi:
         keys = [k.strip() for k in multi.split(",") if k.strip()]
@@ -264,6 +330,10 @@ def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict, openai_
     if extra_env:
         for k, v in extra_env.items():
             os.environ[k] = str(v)
+    # Gateway routing for picon's own agents, applied AFTER extra_env so a
+    # user-supplied OPENAI_API_KEY cannot redirect the server's calls.
+    _apply_llm_gateway_env()
+    _register_gateway_model_costs(list(PICON_AGENT_MODELS.values()) + [SEED_QUESTION_MODEL])
     # Server-owned Azure creds for picon's evaluator (modified monitoring required
     # since Experience mode collects human data). Stored under PICON_AZURE_* on
     # Railway to avoid collision with any user-supplied AZURE_* and mapped to the
@@ -481,10 +551,10 @@ def _cancel_job_over_budget(job_id: str, scope: str, total: float, limit: float)
 
 # Agent model configuration for picon pipeline
 PICON_AGENT_MODELS = {
-    "questioner_model": os.getenv("PICON_QUESTIONER_MODEL", "gpt-5"),
-    "extractor_model": os.getenv("PICON_EXTRACTOR_MODEL", "gpt-5.1"),
-    "web_search_model": os.getenv("PICON_WEB_SEARCH_MODEL", "gpt-5"),
-    "evaluator_model": os.getenv("PICON_EVALUATOR_MODEL", "gemini/gemini-2.5-flash"),
+    "questioner_model": _gateway_model(os.getenv("PICON_QUESTIONER_MODEL", "gpt-5")),
+    "extractor_model": _gateway_model(os.getenv("PICON_EXTRACTOR_MODEL", "gpt-5.1")),
+    "web_search_model": _gateway_model(os.getenv("PICON_WEB_SEARCH_MODEL", "gpt-5")),
+    "evaluator_model": _gateway_model(os.getenv("PICON_EVALUATOR_MODEL", "gemini/gemini-2.5-flash")),
 }
 
 
@@ -502,7 +572,7 @@ PICON_AGENT_MODELS = {
 # (picon/api.py), so we rebind that name in both namespaces it can resolve
 # through. This runs inside the per-session subprocess, so the rebinding cannot
 # leak into other sessions.
-SEED_QUESTION_MODEL = os.getenv("PICON_SEED_QUESTION_MODEL", "gpt-5")
+SEED_QUESTION_MODEL = _gateway_model(os.getenv("PICON_SEED_QUESTION_MODEL", "gpt-5"))
 
 _SEED_QUESTION_PROMPT = """You write a single opening question for a research interview whose goal is to build an accurate picture of the interviewee.
 
@@ -1528,11 +1598,19 @@ async def _run_agent_evaluation(job_id: str, req: AgentStartRequest):
                 **PICON_AGENT_MODELS,
             )
         else:
+            agent_api_base = req.api_base or None
+            if (
+                USE_LETSUR and req.api_key and not agent_api_base
+                and (req.model or "").startswith("openai/")
+            ):
+                # The user's own OpenAI key must not be sent to our gateway
+                # (OPENAI_API_BASE in the subprocess env). Pin first-party OpenAI.
+                agent_api_base = _OPENAI_FIRST_PARTY_BASE
             run_kwargs = dict(
                 persona=req.persona,
                 name=req.name,
                 model=req.model or "openai/custom",
-                api_base=req.api_base or None,
+                api_base=agent_api_base,
                 api_key=req.api_key or None,
                 num_turns=picon_turns,
                 num_sessions=req.num_sessions,
@@ -1959,10 +2037,13 @@ async def health():
         pass
 
     env_keys = {
+        "LETSUR_API_KEY": USE_LETSUR,
+        "LLM_GATEWAY": LETSUR_API_BASE if USE_LETSUR else None,
         "GEMINI_API_KEY": bool(os.getenv("GEMINI_API_KEY")),
         "OPENAI_API_KEY": bool(os.getenv("OPENAI_API_KEY")),
         "SERPER_API_KEY": bool(os.getenv("SERPER_API_KEY")),
         "BRIDGE_BASE_URL": os.getenv("BRIDGE_BASE_URL", "(not set)"),
+        "models": PICON_AGENT_MODELS,
     }
 
     return {
