@@ -2,3 +2,4 @@ fastapi>=0.109.0
 uvicorn>=0.27.0
 python-dotenv>=1.0.0
 picon-eval
+mcp  # litellm imports it lazily for gpt-5 web-search tool calls; picon-eval does not declare it
