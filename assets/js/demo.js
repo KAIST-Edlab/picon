@@ -9,6 +9,15 @@
     || window.PICON_API_URL
     || '';
 
+  // All backend calls go through apiFetch. ngrok's free tier returns an HTML
+  // interstitial to browser requests unless this header is present, which would
+  // break every JSON response below.
+  function apiFetch(path, opts) {
+    opts = opts || {};
+    var headers = Object.assign({ 'ngrok-skip-browser-warning': 'true' }, opts.headers || {});
+    return fetch(API_BASE + path, Object.assign({}, opts, { headers: headers }));
+  }
+
   // ===== Leaderboard Data (paper baselines) =====
   // IC = Internal Consistency, EC = External Consistency, RC = Retest Consistency
   // Area = normalized triangle area on IC-EC-RC radar chart
@@ -69,7 +78,7 @@
 
   function fetchCommunityEntries() {
     if (!API_BASE) return;
-    fetch(API_BASE + '/api/leaderboard')
+    apiFetch('/api/leaderboard')
       .then(function (res) { return res.json(); })
       .then(function (data) {
         publishedEntries = (data.entries || []).map(function (e) {
@@ -187,7 +196,7 @@
   async function downloadEvalFile(runId) {
     if (!runId || !API_BASE) return;
     try {
-      var res = await fetch(API_BASE + '/api/eval-file/' + runId);
+      var res = await apiFetch('/api/eval-file/' + runId);
       if (!res.ok) {
         var err = await res.json().catch(function () { return {}; });
         alert('Could not download eval file: ' + (err.detail || ('HTTP ' + res.status)));
@@ -263,7 +272,7 @@
     addMessage(expMessages, 'info', 'Starting interview for ' + name + ' (' + turns + ' turns chosen)...');
 
     try {
-      var res = await fetch(API_BASE + '/api/start', {
+      var res = await apiFetch('/api/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: name, num_turns: turns })
@@ -294,7 +303,7 @@
       // Heartbeat: periodically ping the server so it knows we're still here
       expHeartbeat = setInterval(function () {
         if (!expSessionId) { clearInterval(expHeartbeat); return; }
-        fetch(API_BASE + '/api/experience/status/' + expSessionId).catch(function () {});
+        apiFetch('/api/experience/status/' + expSessionId).catch(function () {});
       }, 30000); // every 30s
     } catch (err) {
       addMessage(expMessages, 'info', 'Error: ' + err.message);
@@ -306,7 +315,7 @@
     while (true) {
       await new Promise(function (r) { setTimeout(r, 2000); });
       try {
-        var res = await fetch(API_BASE + '/api/experience/status/' + sessionId);
+        var res = await apiFetch('/api/experience/status/' + sessionId);
         if (!res.ok) return null;
         var data = await res.json();
 
@@ -338,7 +347,7 @@
     var typing = showTyping(expMessages);
 
     try {
-      var res = await fetch(API_BASE + '/api/respond', {
+      var res = await apiFetch('/api/respond', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -364,7 +373,7 @@
         var waited = 0;
         while (waited < maxWait) {
           try {
-            var rRes = await fetch(API_BASE + '/api/results/' + expSessionId);
+            var rRes = await apiFetch('/api/results/' + expSessionId);
             if (rRes.ok) {
               var results = await rRes.json();
               if (results.status === 'complete' && results.results && results.results.eval_scores) {
@@ -525,7 +534,7 @@
 
     (async function () {
       try {
-        var res = await fetch(API_BASE + '/api/agent/start', {
+        var res = await apiFetch('/api/agent/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
@@ -721,7 +730,7 @@
     if (fetchingLogs) return;  // prevent overlapping polls from re-rendering the same slice
     fetchingLogs = true;
     try {
-      var res = await fetch(API_BASE + '/api/agent/logs/' + sessionId + '?since=' + agentLogIndex);
+      var res = await apiFetch('/api/agent/logs/' + sessionId + '?since=' + agentLogIndex);
       if (!res.ok) return;
       var data = await res.json();
       if (data.lines && data.lines.length > 0) {
@@ -754,7 +763,7 @@
         // Logs are best-effort (its own try/catch); failures here are swallowed.
         await fetchAgentLogs(sessionId);
 
-        var res = await fetch(API_BASE + '/api/agent/status/' + sessionId);
+        var res = await apiFetch('/api/agent/status/' + sessionId);
         if (!res.ok) {
           consecutiveFailures++;
           if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
@@ -820,7 +829,7 @@
           var results = null;
           for (var attempt = 0; attempt < 5; attempt++) {
             try {
-              var rRes = await fetch(API_BASE + '/api/agent/results/' + sessionId);
+              var rRes = await apiFetch('/api/agent/results/' + sessionId);
               if (rRes.ok) {
                 results = await rRes.json();
                 break;
@@ -886,7 +895,7 @@
     if (!q || !agentSessionId) return;
     manualSendBtn.disabled = true;
     try {
-      var res = await fetch(API_BASE + '/api/agent/question', {
+      var res = await apiFetch('/api/agent/question', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: agentSessionId, question: q })
@@ -935,7 +944,7 @@
       var sid = agentSessionId;
       if (sid && API_BASE) {
         // Fire-and-forget
-        fetch(API_BASE + '/api/agent/cancel/' + sid, { method: 'DELETE' })
+        apiFetch('/api/agent/cancel/' + sid, { method: 'DELETE' })
           .catch(function () { /* ignore */ });
       }
       document.getElementById('agent-log').style.display = 'none';
