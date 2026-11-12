@@ -176,6 +176,13 @@ JOB_HARD_TIMEOUT = int(os.getenv("JOB_HARD_TIMEOUT", str(JOB_TIMEOUT + 7200)))  
 EVAL_TIMEOUT = int(os.getenv("EVAL_TIMEOUT", "900"))  # 15 min for eval after interview
 # Experience Mode: if browser stops polling for this many seconds, consider abandoned
 EXPERIENCE_ABANDON_TIMEOUT = int(os.getenv("EXPERIENCE_ABANDON_TIMEOUT", "120"))  # 2 minutes
+# Experience mode: how long one question may wait for the human's answer. picon
+# calls the bridge like an LLM endpoint, and its default per-call timeout is
+# 120s; a person who takes longer (reading the guidelines, thinking) makes
+# litellm time out and retry, which re-queues the same question and drops the
+# answer that eventually arrives. The bridge waits this long, and picon's call
+# timeout is raised to match (see run_kwargs["completion_kwargs"]).
+HUMAN_ANSWER_TIMEOUT = int(os.getenv("HUMAN_ANSWER_TIMEOUT", "900"))  # 15 minutes
 # Manual interrogator (human asks the questions in Agent Test Mode): how long the
 # picon subprocess blocks inside questioner.act() waiting for the human's next
 # question before the job is failed.
@@ -927,7 +934,7 @@ async def bridge_chat_completions(session_id: str, request: Request):
     # Wait for the human to respond (abandon detection is handled by the drain loop)
     try:
         human_response = await asyncio.to_thread(
-            session["response_queue"].get, timeout=300  # 5 min max per question
+            session["response_queue"].get, timeout=HUMAN_ANSWER_TIMEOUT
         )
     except queue.Empty:
         human_response = "I'd rather not answer that."
@@ -1044,6 +1051,33 @@ async def experience_start(req: ExperienceStartRequest, request: Request):
         "first_question": None,
         "progress": session["progress"],
     }
+
+
+@app.post("/api/experience/cancel/{session_id}")
+async def experience_cancel(session_id: str):
+    """End an Experience session right away (the browser calls this when the
+    page is refreshed or closed, instead of letting the 2-minute abandon timer
+    expire). Only the interview phase is cancelled: once the human's last
+    answer is in and evaluation has started, the run is left to finish so the
+    result (and the study archive) is not lost."""
+    session = sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session["status"] not in ("queued", "running"):
+        return {"status": session["status"]}
+    if session.get("eval_started_at") is not None:
+        return {"status": session["status"], "note": "evaluation in progress; not cancelled"}
+    proc = session.get("process")
+    if proc and proc.is_alive():
+        await asyncio.get_running_loop().run_in_executor(None, _hard_kill, proc)
+    task = session.get("task")
+    if task and not task.done():
+        task.cancel()
+    session["status"] = "cancelled"
+    session["error"] = "Cancelled: page closed or refreshed"
+    session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
+    logger.info("Experience %s cancelled by the browser (page closed/refreshed)", session_id)
+    return {"status": "cancelled"}
 
 
 @app.get("/api/experience/status/{session_id}")
@@ -1275,6 +1309,10 @@ async def _run_experience_session(
             # INFO logs alive, which Railway logs and the demo terminal rely on.
             verbose=False,
             output_dir=f"/tmp/picon_results/{session_id}",
+            # Forwarded by picon.run() to the interviewee simulator, which merges
+            # it into its get_completion() call: the bridge call must outlast a
+            # slow human answer (picon's default is 120s).
+            completion_kwargs={"timeout": HUMAN_ANSWER_TIMEOUT + 30},
             **PICON_AGENT_MODELS,
         )
         variant = session.get("questioner_variant")

@@ -466,6 +466,30 @@
     }
   }
 
+  // Leaving the page (refresh, close, navigate) ends the interview on the
+  // server immediately instead of waiting for the 2-minute abandon timer.
+  // beforeunload shows the browser's "leave page?" prompt while an interview
+  // is in progress; pagehide fires once the user really leaves. The cancel
+  // call uses keepalive so it survives the unload. Once the last answer is in
+  // (expFinished) the server keeps evaluating, so nothing is cancelled then.
+  function expInterviewActive() {
+    return !!expSessionId && !expFinished;
+  }
+  window.addEventListener('beforeunload', function (e) {
+    if (!expInterviewActive()) return;
+    e.preventDefault();
+    e.returnValue = '';  // required by Chrome to show the prompt
+  });
+  window.addEventListener('pagehide', function () {
+    if (!expInterviewActive()) return;
+    if (expHeartbeat) { clearInterval(expHeartbeat); expHeartbeat = null; }
+    try {
+      apiFetch('/api/experience/cancel/' + expSessionId, { method: 'POST', keepalive: true })
+        .catch(function () {});
+    } catch (err) { /* page is going away */ }
+    expSessionId = null;
+  });
+
   expSend.addEventListener('click', sendExperienceResponse);
   expInput.addEventListener('keydown', function (e) {
     if (e.key === 'Enter') sendExperienceResponse();
