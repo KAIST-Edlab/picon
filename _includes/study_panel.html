@@ -1,0 +1,69 @@
+{%- comment -%}
+Experience-mode markup for the human study pages. Parameters:
+  include.variant  questioner_variant sent to /api/start (neutral | privacy_preserving)
+  include.label    human-readable condition name shown in the header
+Same element ids as demo/index.html so assets/js/demo.js drives it unchanged.
+{%- endcomment -%}
+<div class="container-wide" data-questioner-variant="{{ include.variant }}">
+  <h1>PICon Interview Study <span class="turns-badge">{{ include.label }}</span></h1>
+  <p class="subtitle">A multi-turn interview with PICon. Answer as yourself; your consistency scores appear at the end.</p>
+
+  <div class="demo-description">
+    <strong>How it works.</strong>
+    PICon asks you questions one at a time and follows up on what you say. It may check claims
+    on the web and ask you to confirm details. A standard run is <strong>15 turns</strong>;
+    the <strong>50-turn</strong> option runs the full protocol. After the last question,
+    evaluation takes an additional 2&ndash;3 minutes. Your transcript and scores are recorded
+    for this study, and you can download the raw evaluation file at the end.
+    <br><br>
+    &#10071; <strong>NOTE:</strong> When the interview guideline appears as the first message, type <strong>"OK"</strong> and press Enter to begin.
+    Please do not reload or leave the page during the interview.
+  </div>
+
+  <div class="demo-panel active" id="panel-experience">
+    <!-- Name entry -->
+    <div id="exp-start" class="agent-form">
+      <div class="form-row">
+        <div class="form-group" style="flex:2;">
+          <label for="exp-name">Your name (or participant ID)</label>
+          <input type="text" id="exp-name" placeholder="Enter your name or ID to begin">
+        </div>
+        <div class="form-group" style="flex:1;">
+          <label for="exp-turns">Turns</label>
+          <select id="exp-turns">
+            <option value="15" selected>15 turns (standard)</option>
+            <option value="50">50 turns (full, original protocol)</option>
+          </select>
+        </div>
+      </div>
+      <button class="btn btn-primary" id="exp-start-btn">Start Interview</button>
+    </div>
+
+    <!-- Chat -->
+    <div id="exp-chat" style="display:none;">
+      <div class="chat-container">
+        <div class="chat-header">
+          <h4>PICon Interview <span id="exp-turns-badge" class="turns-badge"></span></h4>
+          <span class="chat-progress" id="exp-progress"></span>
+        </div>
+        <div class="chat-messages" id="exp-messages"></div>
+        <div class="chat-input">
+          <input type="text" id="exp-input" placeholder="Type your response..." autocomplete="off">
+          <button id="exp-send" disabled>Send</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Results card (shown after completion) -->
+    <div id="exp-results" style="display:none;">
+      <div class="results-card">
+        <h3>Your Consistency Report <span id="exp-results-turns-badge" class="turns-badge"></span></h3>
+        <div class="score-grid" id="exp-score-grid"></div>
+        <p class="results-note">Thank you for participating. Your session has been recorded.</p>
+      </div>
+      <div style="margin-top:0.75rem; display:flex; gap:0.5rem; flex-wrap:wrap;">
+        <button class="btn btn-secondary" id="exp-download-eval-btn" style="display:none;">Download Eval (.json)</button>
+      </div>
+    </div>
+  </div>
+</div>

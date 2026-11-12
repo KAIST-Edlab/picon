@@ -12,6 +12,12 @@
   // All backend calls go through apiFetch. ngrok's free tier returns an HTML
   // interstitial to browser requests unless this header is present, which would
   // break every JSON response below.
+  // Human-study pages (/demo/neutral/, /demo/privacy-preserving/) mark their
+  // container with data-questioner-variant; the value is sent to /api/start so
+  // the backend swaps picon's questioner prompt. Absent on the main demo page.
+  var _variantEl = document.querySelector('[data-questioner-variant]');
+  var QUESTIONER_VARIANT = _variantEl ? _variantEl.getAttribute('data-questioner-variant') : null;
+
   function apiFetch(path, opts) {
     opts = opts || {};
     var headers = Object.assign({ 'ngrok-skip-browser-warning': 'true' }, opts.headers || {});
@@ -254,6 +260,21 @@
   var expLoading = false;
   var expHeartbeat = null;
   var pendingExpEntry = null;
+  var expFinished = false;  // interview over: input stays locked for good
+
+  // While picon is thinking the input is disabled (nothing can be typed or
+  // sent); as soon as the next question lands it is re-enabled and focused so
+  // the user can type immediately without clicking into the box.
+  function lockExpInput() {
+    expInput.disabled = true;
+    expSend.disabled = true;
+  }
+  function unlockExpInput() {
+    if (expFinished) return;
+    expInput.disabled = false;
+    expSend.disabled = false;
+    expInput.focus();
+  }
 
   document.getElementById('exp-start-btn').addEventListener('click', async function () {
     var name = document.getElementById('exp-name').value.trim();
@@ -275,7 +296,10 @@
       var res = await apiFetch('/api/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name, num_turns: turns })
+        body: JSON.stringify(Object.assign(
+          { name: name, num_turns: turns },
+          QUESTIONER_VARIANT ? { questioner_variant: QUESTIONER_VARIANT } : {}
+        ))
       });
 
       if (!res.ok) throw new Error('Failed to start: ' + res.status);
@@ -297,8 +321,7 @@
       } else {
         addMessage(expMessages, 'system', data.first_question);
       }
-      expSend.disabled = false;
-      expInput.focus();
+      unlockExpInput();
 
       // Heartbeat: periodically ping the server so it knows we're still here
       expHeartbeat = setInterval(function () {
@@ -342,7 +365,7 @@
 
     expInput.value = '';
     expLoading = true;
-    expSend.disabled = true;
+    lockExpInput();
     addMessage(expMessages, 'user', text);
     var typing = showTyping(expMessages);
 
@@ -365,8 +388,8 @@
       if (data.is_complete) {
         if (expHeartbeat) { clearInterval(expHeartbeat); expHeartbeat = null; }
         addMessage(expMessages, 'info', 'Interview complete! Calculating your consistency scores...');
-        expSend.disabled = true;
-        expInput.disabled = true;
+        expFinished = true;
+        lockExpInput();
 
         // Poll for results — eval may still be running after interview ends
         var maxWait = 600; // 10 min max
@@ -439,10 +462,7 @@
       addMessage(expMessages, 'info', 'Error: ' + err.message);
     } finally {
       expLoading = false;
-      if (!expInput.disabled) {
-        expSend.disabled = false;
-        expInput.focus();
-      }
+      unlockExpInput();
     }
   }
 
@@ -552,8 +572,19 @@
     })();
   }
 
+  // Elements of the Agent Test / Leaderboard tabs are absent on the study
+  // pages (which only carry the Experience markup); skip their wiring there.
+  function onClick(id, fn) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('click', fn);
+  }
+  function onChange(id, fn) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('change', fn);
+  }
+
   // External Agent start
-  document.getElementById('agent-start-btn-external').addEventListener('click', function () {
+  onClick('agent-start-btn-external', function () {
     var name = document.getElementById('ext-agent-name').value.trim();
     var endpoint = document.getElementById('ext-agent-endpoint').value.trim();
     var turns = document.getElementById('ext-agent-turns').value;
@@ -574,7 +605,7 @@
   });
 
   // Quick Agent start
-  document.getElementById('agent-start-btn-quick').addEventListener('click', function () {
+  onClick('agent-start-btn-quick', function () {
     var name = document.getElementById('quick-agent-name').value.trim();
     var model = document.getElementById('quick-agent-model').value.trim();
     var apiKey = document.getElementById('quick-agent-api-key').value.trim();
@@ -1052,6 +1083,7 @@
     entries.sort(function (a, b) { return (b[currentSort] || 0) - (a[currentSort] || 0); });
 
     var tbody = document.getElementById('leaderboard-body');
+    if (!tbody) return;  // study pages have no leaderboard
     tbody.innerHTML = '';
 
     entries.forEach(function (d, i) {
@@ -1093,22 +1125,23 @@
   document.querySelectorAll('.leaderboard-table th.sortable').forEach(function (th) {
     th.addEventListener('click', function () {
       currentSort = th.dataset.col;
-      document.getElementById('lb-sort').value = currentSort;
+      var lbSort = document.getElementById('lb-sort');
+      if (lbSort) lbSort.value = currentSort;
       renderLeaderboard();
     });
   });
 
-  document.getElementById('lb-sort').addEventListener('change', function () {
+  onChange('lb-sort', function () {
     currentSort = this.value;
     renderLeaderboard();
   });
 
-  document.getElementById('lb-type-filter').addEventListener('change', function () {
+  onChange('lb-type-filter', function () {
     currentFilter = this.value;
     renderLeaderboard();
   });
 
-  document.getElementById('lb-turns-filter').addEventListener('change', function () {
+  onChange('lb-turns-filter', function () {
     currentTurnsFilter = this.value;
     renderLeaderboard();
   });

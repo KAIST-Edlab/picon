@@ -12,6 +12,8 @@ Agent Test Mode simply calls picon.run() with the user's external API endpoint.
 
 import asyncio
 import glob
+import json
+import re
 import logging
 import multiprocessing
 import os
@@ -360,6 +362,24 @@ def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict, openai_
 
     import picon
 
+    # Questioner prompt variant (human study pages). picon.run() hardcodes
+    # get_prompt_path("questioner.txt") for the questioner, so swap the path at
+    # the get_agent boundary, the same hook the manual interrogator uses below.
+    # Must be installed BEFORE the manual patch so that wrapper builds on it.
+    questioner_prompt_path = run_kwargs.pop("questioner_prompt_path", None)
+    if questioner_prompt_path:
+        import picon.api as _picon_api_mod
+
+        _orig_get_agent_for_prompt = _picon_api_mod.get_agent
+
+        def _get_agent_with_prompt(role, prompt_path, **agent_kwargs):
+            if role == "questioner":
+                prompt_path = questioner_prompt_path
+            return _orig_get_agent_for_prompt(role, prompt_path, **agent_kwargs)
+
+        _picon_api_mod.get_agent = _get_agent_with_prompt
+        result_queue.put(("log", f"Questioner prompt: {os.path.basename(questioner_prompt_path)}"))
+
     if manual_queue is not None:
         import picon.api
         from picon.schemas import Action as _Action
@@ -550,6 +570,19 @@ def _cancel_job_over_budget(job_id: str, scope: str, total: float, limit: float)
     logger.warning("Job %s cancelled — %s", job_id, msg)
 
 # Agent model configuration for picon pipeline
+# Questioner prompt variants for the human study pages (/demo/neutral/,
+# /demo/privacy-preserving/). Files live next to this module in api/prompts/.
+# A normal Experience run (no variant) keeps picon's bundled questioner.txt.
+_PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
+QUESTIONER_VARIANTS = {
+    "neutral": os.path.join(_PROMPTS_DIR, "neutral_questioner.txt"),
+    "privacy_preserving": os.path.join(_PROMPTS_DIR, "privacy_preserving_questioner.txt"),
+}
+# Study sessions (any session started with a questioner_variant) are archived
+# here as one JSON per session: transcript, scores, and picon's raw result.
+# Empty = archiving off (the Download Eval button still works).
+HUMAN_STUDY_DIR = os.getenv("HUMAN_STUDY_DIR", "")
+
 PICON_AGENT_MODELS = {
     "questioner_model": _gateway_model(os.getenv("PICON_QUESTIONER_MODEL", "gpt-5")),
     "extractor_model": _gateway_model(os.getenv("PICON_EXTRACTOR_MODEL", "gpt-5.1")),
@@ -777,6 +810,8 @@ agent_jobs: Dict[str, dict] = {}
 class ExperienceStartRequest(BaseModel):
     name: str
     num_turns: int = 50
+    # One of QUESTIONER_VARIANTS (human study pages); None = default questioner.
+    questioner_variant: Optional[str] = None
 
 
 class ExperienceRespondRequest(BaseModel):
@@ -879,6 +914,14 @@ async def bridge_chat_completions(session_id: str, request: Request):
         "messages": messages,
         "turn": session.get("turn_count", 0),
     })
+    if "transcript" in session:
+        session["transcript"].append({
+            "turn": session.get("turn_count", 0),
+            "question": last_question,
+            "asked_at": time.time(),
+            "response": None,
+            "answered_at": None,
+        })
     session["turn_count"] = session.get("turn_count", 0) + 1
 
     # Wait for the human to respond (abandon detection is handled by the drain loop)
@@ -921,6 +964,13 @@ async def experience_start(req: ExperienceStartRequest, request: Request):
     ip = _client_ip(request)
     await _check_ip_budget(ip)
 
+    variant = req.questioner_variant or None
+    if variant and variant not in QUESTIONER_VARIANTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown questioner_variant '{variant}'. Valid: {sorted(QUESTIONER_VARIANTS)}",
+        )
+
     session_id = str(uuid.uuid4())
 
     # Determine the server's own URL for the bridge
@@ -942,6 +992,14 @@ async def experience_start(req: ExperienceStartRequest, request: Request):
         "last_poll_time": time.time(),
         "started_at": time.time(),
         "eval_started_at": None,
+        # Human study bookkeeping. The transcript is recorded server-side as
+        # questions pass through the bridge and answers through /api/respond,
+        # so it survives even when picon's own result never materialises
+        # (abandoned, timed out, or failed evaluation).
+        "questioner_variant": variant,
+        "num_turns_requested": req.num_turns,
+        "transcript": [],
+        "picon_result": None,
     }
     sessions[session_id] = session
 
@@ -1038,6 +1096,10 @@ async def experience_respond(req: ExperienceRespondRequest):
 
     # Put human's response in the queue for picon to pick up
     session["response_queue"].put(req.response)
+    transcript = session.get("transcript")
+    if transcript and transcript[-1].get("response") is None:
+        transcript[-1]["response"] = req.response
+        transcript[-1]["answered_at"] = time.time()
 
     # If this was the last interview turn, mark the eval phase as starting NOW so
     # the eval gets its own EVAL_TIMEOUT budget instead of inheriting whatever's
@@ -1215,6 +1277,10 @@ async def _run_experience_session(
             output_dir=f"/tmp/picon_results/{session_id}",
             **PICON_AGENT_MODELS,
         )
+        variant = session.get("questioner_variant")
+        if variant:
+            # Consumed by _picon_worker (popped before picon.run()).
+            run_kwargs["questioner_prompt_path"] = QUESTIONER_VARIANTS[variant]
 
         result_queue = multiprocessing.Queue()
         proc = multiprocessing.Process(
@@ -1272,6 +1338,7 @@ async def _run_experience_session(
 
             if msg_type == "result":
                 result = payload
+                session["picon_result"] = result
                 scores = result.eval_scores or {}
                 logger.info("Experience eval_scores keys for %s: %s", name, list(scores.keys()))
                 logger.info("Experience eval_scores for %s: %s", name, scores)
@@ -1321,6 +1388,59 @@ async def _run_experience_session(
         _release_key(key_idx)
         sem.release()
         logger.info("Experience %s released slot + key pool[%d]", session_id, key_idx)
+        if session.get("questioner_variant"):
+            # Archive on every exit path (complete, error, abandoned, timeout,
+            # cancelled) so a study session is never lost.
+            try:
+                await asyncio.to_thread(_archive_study_session, session_id, session)
+            except Exception:
+                logger.exception("Study archive failed for %s", session_id)
+
+
+def _archive_study_session(session_id: str, session: dict) -> Optional[str]:
+    """Write one JSON file for a human-study session into HUMAN_STUDY_DIR.
+
+    Layout: {HUMAN_STUDY_DIR}/{variant}/{YYYYmmdd_HHMMSS}_{name}_{sid8}.json
+    Contents: metadata, the server-side transcript (every question picon asked
+    and the human's answer, with timestamps), the 3 headline scores, picon's
+    full eval_scores / summary, and picon's raw_results (full history +
+    evaluation + agent memories) when the run produced one.
+    """
+    if not HUMAN_STUDY_DIR:
+        logger.warning("HUMAN_STUDY_DIR not set; study session %s not archived", session_id)
+        return None
+    variant = session.get("questioner_variant") or "default"
+    result = session.get("picon_result")
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", (session.get("name") or "anon")).strip("_")[:40] or "anon"
+    stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(session.get("started_at", time.time())))
+    out_dir = os.path.join(HUMAN_STUDY_DIR, variant)
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"{stamp}_{safe_name}_{session_id[:8]}.json")
+    record = {
+        "session_id": session_id,
+        "name": session.get("name"),
+        "questioner_variant": variant,
+        "questioner_prompt_file": os.path.basename(QUESTIONER_VARIANTS.get(variant, "questioner.txt")),
+        "num_turns_requested": session.get("num_turns_requested"),
+        "picon_turns": session.get("picon_turns"),
+        "status": session.get("status"),
+        "error": session.get("error"),
+        "started_at": session.get("started_at"),
+        "finished_at": time.time(),
+        "started_at_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(session.get("started_at", time.time()))),
+        "models": PICON_AGENT_MODELS,
+        "scores": session.get("result"),
+        "transcript": session.get("transcript", []),
+        "eval_scores": getattr(result, "eval_scores", None),
+        "summary": getattr(result, "summary", None),
+        "raw_results": getattr(result, "raw_results", None),
+    }
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(record, f, ensure_ascii=False, indent=2, default=str)
+    os.replace(tmp_path, path)
+    logger.info("Study session %s archived to %s", session_id, path)
+    return path
 
 
 # ===========================================================================
@@ -2044,6 +2164,8 @@ async def health():
         "SERPER_API_KEY": bool(os.getenv("SERPER_API_KEY")),
         "BRIDGE_BASE_URL": os.getenv("BRIDGE_BASE_URL", "(not set)"),
         "models": PICON_AGENT_MODELS,
+        "questioner_variants": sorted(QUESTIONER_VARIANTS),
+        "HUMAN_STUDY_DIR": HUMAN_STUDY_DIR or None,
     }
 
     return {
