@@ -11,10 +11,11 @@ Same element ids as demo/index.html so assets/js/demo.js drives it unchanged.
   <div class="demo-description">
     <strong>How it works.</strong>
     PICon asks you questions one at a time and follows up on what you say. It may check claims
-    on the web and ask you to confirm details. A standard run is <strong>15 turns</strong>;
-    the <strong>50-turn</strong> option runs the full protocol. After the last question,
-    evaluation takes an additional 2&ndash;3 minutes. Your transcript and scores are recorded
-    for this study, and you can download the raw evaluation file at the end.
+    on the web and ask you to confirm details. The interview runs the full
+    <strong>50-turn</strong> protocol: ten short questions about you, the main interview, and a
+    few repeated questions at the end. After the last question, evaluation takes an additional
+    2&ndash;3 minutes. Your transcript and scores are recorded for this study, and you can
+    download the raw evaluation file at the end.
     <br><br>
     &#10071; <strong>NOTE:</strong> When the interview guideline appears as the first message, type <strong>"OK"</strong> and press Enter to begin.
     Please do not reload or leave the page during the interview.
@@ -29,11 +30,10 @@ Same element ids as demo/index.html so assets/js/demo.js drives it unchanged.
           <input type="text" id="exp-name" placeholder="Enter your name or ID to begin">
         </div>
         <div class="form-group" style="flex:1;">
-          <label for="exp-turns">Turns</label>
-          <select id="exp-turns">
-            <option value="15" selected>15 turns (standard)</option>
-            <option value="50">50 turns (full, original protocol)</option>
-          </select>
+          <label>Turns</label>
+          <!-- Fixed at 50 for the study; demo.js reads #exp-turns like the main demo's select. -->
+          <input type="hidden" id="exp-turns" value="50">
+          <div class="turns-badge" style="align-self:flex-start;">50 turns (full protocol)</div>
         </div>
       </div>
       <button class="btn btn-primary" id="exp-start-btn">Start Interview</button>
