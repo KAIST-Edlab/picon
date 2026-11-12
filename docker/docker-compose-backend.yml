@@ -11,11 +11,9 @@ services:
       - HOME=/tmp
       - BRIDGE_BASE_URL=http://localhost:9978
       - SQLITE_PATH=/workspace/PICon_Demo/data/picon_data.db
-      - HUMAN_STUDY_DIR=/data/human_study
+      - HUMAN_STUDY_DIR=/workspace/PICon_Demo/data/human_study_data
     volumes:
       - /home/demo/PICon_Demo:/workspace/PICon_Demo
-      # Human-study archive (one JSON per study session), on the 26 server's local disk.
-      - /nfs_data_storage/picon/human_study_data:/data/human_study
     ports:
       - "127.0.0.1:9978:9978"
     command: bash ./run_backend.sh 0.0.0.0 9978 --foreground

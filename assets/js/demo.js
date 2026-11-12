@@ -18,10 +18,23 @@
   var _variantEl = document.querySelector('[data-questioner-variant]');
   var QUESTIONER_VARIANT = _variantEl ? _variantEl.getAttribute('data-questioner-variant') : null;
 
+  // fetch() has no timeout of its own: a request that the tunnel silently drops
+  // would hang forever. Every call gets a deadline (opts.timeoutMs, default 60s)
+  // so callers can retry; /api/respond passes a longer one because the server
+  // holds that request while picon prepares the next question.
   function apiFetch(path, opts) {
     opts = opts || {};
     var headers = Object.assign({ 'ngrok-skip-browser-warning': 'true' }, opts.headers || {});
-    return fetch(API_BASE + path, Object.assign({}, opts, { headers: headers }));
+    var timeoutMs = opts.timeoutMs || 60000;
+    var init = Object.assign({}, opts, { headers: headers });
+    delete init.timeoutMs;
+    if (typeof AbortController !== 'undefined' && !init.signal) {
+      var ctrl = new AbortController();
+      init.signal = ctrl.signal;
+      var timer = setTimeout(function () { ctrl.abort(); }, timeoutMs);
+      return fetch(API_BASE + path, init).finally(function () { clearTimeout(timer); });
+    }
+    return fetch(API_BASE + path, init);
   }
 
   // ===== Leaderboard Data (paper baselines) =====
@@ -190,6 +203,7 @@
       predefined: 'Part 1: Getting to Know You',
       main: 'Part 2: Interrogation',
       repeat: 'Part 3: Retest',
+      evaluating: 'Evaluating',
       complete: 'Complete'
     }[progress.phase] || progress.phase;
     el.textContent = progress.total
@@ -327,7 +341,7 @@
       expHeartbeat = setInterval(function () {
         if (!expSessionId) { clearInterval(expHeartbeat); return; }
         apiFetch('/api/experience/status/' + expSessionId).catch(function () {});
-      }, 30000); // every 30s
+      }, 15000); // every 15s (server abandons after 30 min without one)
     } catch (err) {
       addMessage(expMessages, 'info', 'Error: ' + err.message);
     }
@@ -335,11 +349,15 @@
 
   async function pollExperienceQueue(sessionId, messagesEl, queueMsgEl) {
     // Poll /api/experience/status until we get the first question or an error.
+    // Transient network failures (ngrok / proxy hiccups) are retried, not fatal.
+    var failures = 0;
     while (true) {
       await new Promise(function (r) { setTimeout(r, 2000); });
       try {
         var res = await apiFetch('/api/experience/status/' + sessionId);
-        if (!res.ok) return null;
+        if (res.status === 404) return null;
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        failures = 0;
         var data = await res.json();
 
         // Update queue position message in-place
@@ -354,9 +372,43 @@
         if (data.first_question) return data.first_question;
         if (data.status === 'running' && !data.first_question) continue; // still loading
       } catch (e) {
-        return null;
+        failures += 1;
+        if (failures >= 30) return null; // ~1 min of continuous failures
       }
     }
+  }
+
+  // Number of answers the server has acknowledged. Sent with every answer so a
+  // retried POST (after a network failure) is not delivered to picon twice.
+  var expAnswersSent = 0;
+
+  // POST one answer, retrying on network errors and 5xx. The server dedupes on
+  // `turn`, so a retry after a request that actually reached the server just
+  // waits for the next question like the original would have.
+  async function postExperienceAnswer(text, turn) {
+    var attempts = 0;
+    var lastErr = null;
+    while (attempts < 6) {
+      attempts += 1;
+      try {
+        var res = await apiFetch('/api/respond', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          timeoutMs: 150000, // picon usually answers within a minute; a retry is safe (server dedupes on turn)
+          body: JSON.stringify({
+            session_id: expSessionId,
+            response: text,
+            turn: turn,
+          })
+        });
+        if (res.status >= 500 || res.status === 429) throw new Error('HTTP ' + res.status);
+        return res;
+      } catch (e) {
+        lastErr = e;
+        await new Promise(function (r) { setTimeout(r, Math.min(3000 * attempts, 10000)); });
+      }
+    }
+    throw lastErr || new Error('Network error');
   }
 
   async function sendExperienceResponse() {
@@ -370,17 +422,11 @@
     var typing = showTyping(expMessages);
 
     try {
-      var res = await apiFetch('/api/respond', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          session_id: expSessionId,
-          response: text,
-        })
-      });
+      var res = await postExperienceAnswer(text, expAnswersSent);
 
       typing.remove();
       if (!res.ok) throw new Error('Error: ' + res.status);
+      expAnswersSent += 1;
       var data = await res.json();
 
       setProgress(expProgress, data.progress);
@@ -392,7 +438,8 @@
         lockExpInput();
 
         // Poll for results — eval may still be running after interview ends
-        var maxWait = 600; // 10 min max
+        // (a 50-turn interview can take 10-20 minutes to score)
+        var maxWait = 1800; // 30 min max, matches the server's EVAL_TIMEOUT
         var waited = 0;
         while (waited < maxWait) {
           try {

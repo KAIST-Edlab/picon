@@ -13,6 +13,7 @@ Agent Test Mode simply calls picon.run() with the user's external API endpoint.
 import asyncio
 import glob
 import json
+import tempfile
 import re
 import logging
 import multiprocessing
@@ -102,6 +103,44 @@ if USE_LETSUR:
     logger.info("LLM gateway enabled: openai-compatible calls go to %s", LETSUR_API_BASE)
 
 # ---------------------------------------------------------------------------
+# Vertex AI (Google Cloud) for "vertex_ai/..." models, e.g. the evaluator.
+# ---------------------------------------------------------------------------
+# litellm authenticates Vertex calls with Application Default Credentials, so
+# the JSON credential in VERTEXAI_CREDENTIALS (service account or
+# authorized_user) is written to a private file once and exposed to picon's
+# worker through GOOGLE_APPLICATION_CREDENTIALS, together with the project and
+# location. (Vertex "express mode" API keys are not supported by the installed
+# litellm, so they are not used here.)
+VERTEXAI_CREDENTIALS = os.getenv("VERTEXAI_CREDENTIALS", "")
+VERTEXAI_PROJECT = os.getenv("VERTEXAI_PROJECT", "")
+VERTEXAI_LOCATION = os.getenv("VERTEXAI_LOCATION") or os.getenv("VERTEXAI_REGION", "") or "global"
+_VERTEX_CRED_FILE = ""
+if VERTEXAI_CREDENTIALS:
+    try:
+        json.loads(VERTEXAI_CREDENTIALS)
+        _cred_dir = os.path.join(tempfile.gettempdir(), "picon_vertex")
+        os.makedirs(_cred_dir, exist_ok=True)
+        _VERTEX_CRED_FILE = os.path.join(_cred_dir, "credentials.json")
+        with open(_VERTEX_CRED_FILE, "w", encoding="utf-8") as _f:
+            _f.write(VERTEXAI_CREDENTIALS)
+        os.chmod(_VERTEX_CRED_FILE, 0o600)
+        logger.info("Vertex AI credentials ready (project=%s, location=%s)", VERTEXAI_PROJECT, VERTEXAI_LOCATION)
+    except Exception as _e:
+        logger.error("VERTEXAI_CREDENTIALS is not valid JSON; vertex_ai/ models will fail: %s", _e)
+        _VERTEX_CRED_FILE = ""
+USE_VERTEX = bool(_VERTEX_CRED_FILE)
+
+
+def _apply_vertex_env():
+    """Point litellm's vertex_ai provider at the server's Google Cloud credentials."""
+    if not USE_VERTEX:
+        return
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _VERTEX_CRED_FILE
+    if VERTEXAI_PROJECT:
+        os.environ["VERTEXAI_PROJECT"] = VERTEXAI_PROJECT
+    os.environ["VERTEXAI_LOCATION"] = VERTEXAI_LOCATION
+
+# ---------------------------------------------------------------------------
 # SQLite for persistent storage (leaderboard + completed results)
 # ---------------------------------------------------------------------------
 SQLITE_PATH = os.getenv("SQLITE_PATH", "/tmp/picon_data.db")
@@ -171,18 +210,30 @@ MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "60"))
 JOB_TIMEOUT = int(os.getenv("JOB_TIMEOUT", "3600"))  # 60 minutes soft deadline
 # Hard deadline: after this, we really terminate the subprocess. Must be >= JOB_TIMEOUT.
 JOB_HARD_TIMEOUT = int(os.getenv("JOB_HARD_TIMEOUT", str(JOB_TIMEOUT + 7200)))  # +2h grace
-# Once the human has answered the last interview turn, picon enters its eval phase.
-# The eval phase gets its OWN budget so a slow interview doesn't eat its time.
-EVAL_TIMEOUT = int(os.getenv("EVAL_TIMEOUT", "900"))  # 15 min for eval after interview
-# Experience Mode: if browser stops polling for this many seconds, consider abandoned
-EXPERIENCE_ABANDON_TIMEOUT = int(os.getenv("EXPERIENCE_ABANDON_TIMEOUT", "120"))  # 2 minutes
+# Once picon's evaluator actually starts (the worker reports it, see the
+# "phase" message), the eval phase gets its OWN budget so a slow interview
+# doesn't eat its time. A 50-turn interview produces ~70 Q/A pairs and the
+# evaluator makes dozens of LLM calls, so this is generous on purpose.
+EVAL_TIMEOUT = int(os.getenv("EVAL_TIMEOUT", "1800"))  # 30 min for eval after interview
+# Experience Mode: if the browser stops polling for this many seconds, consider
+# the session abandoned. The page sends a heartbeat every 15s and cancels the
+# session explicitly when it is closed or refreshed, so this only has to catch
+# crashed browsers; it must survive a laptop going to sleep, a background tab
+# being throttled, or a few minutes of flaky network.
+EXPERIENCE_ABANDON_TIMEOUT = int(os.getenv("EXPERIENCE_ABANDON_TIMEOUT", "1800"))  # 30 minutes
+# Experience Mode: hard cap on the whole interview (human + picon). A 50-turn
+# human interview typically takes 45-90 minutes; people take breaks.
+EXPERIENCE_HARD_TIMEOUT = int(os.getenv("EXPERIENCE_HARD_TIMEOUT", "21600"))  # 6 hours
 # Experience mode: how long one question may wait for the human's answer. picon
 # calls the bridge like an LLM endpoint, and its default per-call timeout is
-# 120s; a person who takes longer (reading the guidelines, thinking) makes
-# litellm time out and retry, which re-queues the same question and drops the
-# answer that eventually arrives. The bridge waits this long, and picon's call
-# timeout is raised to match (see run_kwargs["completion_kwargs"]).
-HUMAN_ANSWER_TIMEOUT = int(os.getenv("HUMAN_ANSWER_TIMEOUT", "900"))  # 15 minutes
+# 120s; a person who takes longer makes litellm time out and retry, which
+# re-queues the same question and drops the answer that eventually arrives.
+# The bridge therefore waits as long as the session itself may live (the
+# abandon / hard-timeout checks end dead sessions), and picon's call timeout
+# is raised to match (see run_kwargs["completion_kwargs"]). The bridge never
+# fabricates an answer: a timeout ends the interview instead of silently
+# recording "I'd rather not answer that." for a question the person never saw.
+HUMAN_ANSWER_TIMEOUT = int(os.getenv("HUMAN_ANSWER_TIMEOUT", str(EXPERIENCE_HARD_TIMEOUT)))
 # Manual interrogator (human asks the questions in Agent Test Mode): how long the
 # picon subprocess blocks inside questioner.act() waiting for the human's next
 # question before the job is failed.
@@ -342,6 +393,7 @@ def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict, openai_
     # Gateway routing for picon's own agents, applied AFTER extra_env so a
     # user-supplied OPENAI_API_KEY cannot redirect the server's calls.
     _apply_llm_gateway_env()
+    _apply_vertex_env()
     _register_gateway_model_costs(list(PICON_AGENT_MODELS.values()) + [SEED_QUESTION_MODEL])
     # Server-owned Azure creds for picon's evaluator (modified monitoring required
     # since Experience mode collects human data). Stored under PICON_AZURE_* on
@@ -368,6 +420,27 @@ def _picon_worker(result_queue: multiprocessing.Queue, run_kwargs: dict, openai_
     root.setLevel(_logging.INFO)
 
     import picon
+
+    # Report picon's real phase transitions to the parent: the retest
+    # (finalize) and the evaluator (evaluate). The parent uses the latter to
+    # start the eval timeout and to tell the browser the interview is over.
+    # Installed before any other patch of these methods so the manual-mode
+    # wrapper below builds on it.
+    from picon.env.interrogation_env import InterrogationEnv as _EnvPhases
+
+    _orig_finalize_phase = _EnvPhases.finalize
+    _orig_evaluate_phase = _EnvPhases.evaluate
+
+    def _finalize_with_phase(self, *a, **kw):
+        result_queue.put(("phase", "repeat"))
+        return _orig_finalize_phase(self, *a, **kw)
+
+    def _evaluate_with_phase(self, *a, **kw):
+        result_queue.put(("phase", "evaluating"))
+        return _orig_evaluate_phase(self, *a, **kw)
+
+    _EnvPhases.finalize = _finalize_with_phase
+    _EnvPhases.evaluate = _evaluate_with_phase
 
     # Questioner prompt variant (human study pages). picon.run() hardcodes
     # get_prompt_path("questioner.txt") for the questioner, so swap the path at
@@ -824,6 +897,10 @@ class ExperienceStartRequest(BaseModel):
 class ExperienceRespondRequest(BaseModel):
     session_id: str
     response: str
+    # 0-based index of this answer (number of answers the browser has already
+    # had acknowledged). Lets the browser retry a failed POST without the
+    # same answer being delivered to picon twice. Older pages omit it.
+    turn: Optional[int] = None
 
 
 class AgentStartRequest(BaseModel):
@@ -852,6 +929,9 @@ _EXTRA_ENV_DENYLIST = {
     "OPENAI_API_KEY", "OPENAI_API_KEYS",
     "GEMINI_API_KEY",
     "SERPER_API_KEY", "TAVILY_API_KEY",
+    "LETSUR_API_KEY", "LETSUR_API_BASE",
+    "GOOGLE_APPLICATION_CREDENTIALS", "VERTEXAI_CREDENTIALS",
+    "VERTEXAI_PROJECT", "VERTEXAI_LOCATION", "VERTEXAI_REGION",
     # Note: AZURE_API_KEY/BASE/VERSION are NOT denylisted — the server's own Azure
     # creds live under PICON_AZURE_* and are re-applied after extra_env in the
     # worker, so a user-supplied AZURE_* cannot overwrite them. Leech risk for
@@ -916,11 +996,16 @@ async def bridge_chat_completions(session_id: str, request: Request):
             break
 
     # Put the question in the queue for the browser to pick up
-    session["question_queue"].put({
+    question_item = {
         "question": last_question,
         "messages": messages,
         "turn": session.get("turn_count", 0),
-    })
+    }
+    # The latest question is also kept on the session so a retried
+    # /api/respond can re-deliver it when the original response was lost on
+    # the way to the browser (the queue entry is consumed only once).
+    session["last_question_item"] = question_item
+    session["question_queue"].put(question_item)
     if "transcript" in session:
         session["transcript"].append({
             "turn": session.get("turn_count", 0),
@@ -931,13 +1016,24 @@ async def bridge_chat_completions(session_id: str, request: Request):
         })
     session["turn_count"] = session.get("turn_count", 0) + 1
 
-    # Wait for the human to respond (abandon detection is handled by the drain loop)
-    try:
-        human_response = await asyncio.to_thread(
-            session["response_queue"].get, timeout=HUMAN_ANSWER_TIMEOUT
-        )
-    except queue.Empty:
-        human_response = "I'd rather not answer that."
+    # Wait for the human to respond (abandon detection is handled by the drain
+    # loop). Poll in short slices so a cancelled / timed-out session releases
+    # this call instead of holding the thread for hours.
+    human_response = None
+    wait_deadline = time.time() + HUMAN_ANSWER_TIMEOUT
+    while time.time() < wait_deadline:
+        try:
+            human_response = await asyncio.to_thread(
+                session["response_queue"].get, timeout=5
+            )
+            break
+        except queue.Empty:
+            if session["status"] not in ("running", "queued"):
+                break
+    if human_response is None:
+        # Session ended (cancelled, abandoned, hard timeout) or the person never
+        # answered: fail the picon call rather than invent an answer.
+        raise HTTPException(status_code=503, detail="Session ended before the human answered")
 
     # Return as OpenAI chat completion format
     return {
@@ -1105,7 +1201,7 @@ async def experience_status(session_id: str):
     if session["status"] == "running":
         try:
             first_q = session["question_queue"].get_nowait()
-            if first_q.get("question") == "__COMPLETE__":
+            if first_q.get("question") in ("__COMPLETE__", "__EVAL__"):
                 resp["status"] = session["status"]
                 resp["error"] = session.get("error") or "Interview failed to start"
             else:
@@ -1128,50 +1224,65 @@ async def experience_respond(req: ExperienceRespondRequest):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Put human's response in the queue for picon to pick up
-    session["response_queue"].put(req.response)
-    transcript = session.get("transcript")
-    if transcript and transcript[-1].get("response") is None:
-        transcript[-1]["response"] = req.response
-        transcript[-1]["answered_at"] = time.time()
+    # Put human's response in the queue for picon to pick up. A retried POST
+    # (same `turn` as an answer already accepted) is not delivered again: it
+    # just waits for the next question like the original request did.
+    answers_received = session.get("answers_received", 0)
+    if req.turn is not None and req.turn < answers_received:
+        logger.info("Experience %s duplicate answer for turn %d ignored", req.session_id, req.turn)
+    else:
+        session["response_queue"].put(req.response)
+        session["answers_received"] = answers_received + 1
+        # Number of questions asked so far: the next question picon asks will
+        # carry turn >= this mark. Stored on the session so a retry of this
+        # answer waits for (or re-delivers) the same next question.
+        session["answer_mark"] = session.get("turn_count", 0)
+        transcript = session.get("transcript")
+        if transcript and transcript[-1].get("response") is None:
+            transcript[-1]["response"] = req.response
+            transcript[-1]["answered_at"] = time.time()
+    answer_mark = session.get("answer_mark", 0)
 
-    # If this was the last interview turn, mark the eval phase as starting NOW so
-    # the eval gets its own EVAL_TIMEOUT budget instead of inheriting whatever's
-    # left of JOB_HARD_TIMEOUT after a slow interview. turn_count is incremented
-    # by the bridge endpoint each time picon ASKS — so once it's reached picon_turns,
-    # picon has asked the final question and the human's current response is the last.
-    picon_turns = session.get("picon_turns", 0)
-    if (
-        session.get("eval_started_at") is None
-        and picon_turns
-        and session.get("turn_count", 0) >= picon_turns
-    ):
-        session["eval_started_at"] = time.time()
-        logger.info(
-            "Experience %s final response received (turn %d/%d) — eval phase started",
-            req.session_id, session.get("turn_count", 0), picon_turns,
-        )
+    # The eval phase is NOT inferred from the turn count here: picon asks extra
+    # confirmation questions that are not counted as turns, and the repeat
+    # (retest) questions come after the last counted turn, so the bridge's
+    # question count reaches picon_turns while the interview is still going.
+    # The worker reports the real phase transitions (see _picon_worker).
 
     # Wait for picon to process and produce the next question (or finish).
     # Under heavy load LLM calls can be slow, so we retry with a long total deadline
     # rather than giving up after a single timeout.
+    # The next question is taken from session["last_question_item"] (set by the
+    # bridge for every question) rather than only from question_queue: a queue
+    # entry can be consumed by an earlier /api/respond whose response never
+    # reached the browser (tunnel hiccup), and the retry must still get it.
     next_q = None
     deadline = time.time() + 600  # 10 min total patience
     while time.time() < deadline:
-        try:
-            next_q = await asyncio.to_thread(
-                session["question_queue"].get, timeout=10  # check every 10s
-            )
+        if session.get("eval_started_at") is not None or session["status"] in ("complete", "error", "cancelled"):
+            return {
+                "next_question": None,
+                "is_complete": True,
+                "progress": session["progress"],
+            }
+        latest = session.get("last_question_item")
+        if latest and latest.get("turn", -1) >= answer_mark:
+            next_q = latest
+            # Drop the queue copies of questions up to this one so the status
+            # endpoint does not hand a stale question to a later poll. Keep
+            # sentinels.
+            try:
+                while True:
+                    item = session["question_queue"].get_nowait()
+                    if item.get("question") in ("__COMPLETE__", "__EVAL__"):
+                        session["question_queue"].put(item)
+                        break
+                    if item.get("turn", -1) >= next_q.get("turn", -1):
+                        break
+            except queue.Empty:
+                pass
             break
-        except queue.Empty:
-            # Check if picon finished or errored while we were waiting
-            if session["status"] in ("complete", "error", "cancelled"):
-                return {
-                    "next_question": None,
-                    "is_complete": True,
-                    "progress": session["progress"],
-                }
-            continue  # keep waiting
+        await asyncio.sleep(0.5)
 
     if next_q is None:
         # Timed out after full deadline — something is stuck
@@ -1182,8 +1293,8 @@ async def experience_respond(req: ExperienceRespondRequest):
             "error": "Timed out waiting for next question",
         }
 
-    # Check if it's a completion signal
-    if next_q.get("question") == "__COMPLETE__":
+    # Check if it's a completion signal (interview over, or evaluator started)
+    if next_q.get("question") in ("__COMPLETE__", "__EVAL__"):
         return {
             "next_question": None,
             "is_complete": True,
@@ -1329,8 +1440,8 @@ async def _run_experience_session(
         session["process"] = proc
         proc.start()
 
-        # Drain results from the subprocess. eval_started_at is set by /api/respond
-        # when the human submits their final answer (see experience_respond).
+        # Drain results from the subprocess. eval_started_at is set when the
+        # worker reports that picon's evaluator started (see the "phase" message).
         job_start = session.get("started_at", time.time())
         while proc.is_alive() or not result_queue.empty():
             eval_started = session.get("eval_started_at")
@@ -1343,9 +1454,9 @@ async def _run_experience_session(
                     session["error"] = "Evaluation timed out"
                     session["question_queue"].put({"question": "__COMPLETE__", "turn": -1})
                     break
-            elif time.time() - job_start > JOB_HARD_TIMEOUT:
+            elif time.time() - job_start > EXPERIENCE_HARD_TIMEOUT:
                 # Interview phase exceeded the hard cap.
-                logger.warning("Experience %s INTERVIEW HARD timeout after %ds", session_id, JOB_HARD_TIMEOUT)
+                logger.warning("Experience %s INTERVIEW HARD timeout after %ds", session_id, EXPERIENCE_HARD_TIMEOUT)
                 await asyncio.to_thread(_hard_kill, proc)
                 session["status"] = "error"
                 session["error"] = "Interview timed out"
@@ -1396,6 +1507,19 @@ async def _run_experience_session(
 
             elif msg_type == "cost":
                 _add_job_cost(session_id, payload)
+
+            elif msg_type == "phase":
+                session["progress"]["phase"] = payload
+                if payload == "evaluating" and session.get("eval_started_at") is None:
+                    # The interview (incl. confirmation + retest questions) is
+                    # really over: start the eval budget and release the
+                    # browser's pending /api/respond so it can show "evaluating".
+                    session["eval_started_at"] = time.time()
+                    logger.info(
+                        "Experience %s interview finished (%d questions asked) — eval phase started",
+                        session_id, session.get("turn_count", 0),
+                    )
+                    session["question_queue"].put({"question": "__EVAL__", "turn": -1})
 
             elif msg_type == "error":
                 logger.error("Experience session error for %s: %s", name, payload)
@@ -2144,7 +2268,7 @@ async def admin_cleanup():
         last_poll = session.get("last_poll_time", now)
         started = session.get("started_at", now)
         abandoned = now - last_poll > EXPERIENCE_ABANDON_TIMEOUT
-        timed_out = now - started > JOB_HARD_TIMEOUT
+        timed_out = now - started > EXPERIENCE_HARD_TIMEOUT
         if abandoned or timed_out:
             task = session.get("task")
             if task and not task.done():
@@ -2197,6 +2321,8 @@ async def health():
     env_keys = {
         "LETSUR_API_KEY": USE_LETSUR,
         "LLM_GATEWAY": LETSUR_API_BASE if USE_LETSUR else None,
+        "AZURE": bool(os.getenv("PICON_AZURE_API_KEY")) and (os.getenv("PICON_AZURE_API_BASE") or None),
+        "VERTEX": {"project": VERTEXAI_PROJECT, "location": VERTEXAI_LOCATION} if USE_VERTEX else None,
         "GEMINI_API_KEY": bool(os.getenv("GEMINI_API_KEY")),
         "OPENAI_API_KEY": bool(os.getenv("OPENAI_API_KEY")),
         "SERPER_API_KEY": bool(os.getenv("SERPER_API_KEY")),
